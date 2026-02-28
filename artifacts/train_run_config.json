@@ -1,0 +1,65 @@
+{
+  "total_timesteps": 1000000,
+  "n_envs": 4,
+  "ppo": {
+    "n_steps": 1024,
+    "batch_size": 256,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "learning_rate": 0.0003,
+    "ent_coef": 0.0,
+    "clip_range": 0.2,
+    "net_arch": [
+      256,
+      128
+    ],
+    "seed": 0,
+    "checkpoint_freq_steps": 100000,
+    "eval_freq_steps": 100000,
+    "eval_episodes": 20
+  },
+  "env": {
+    "dt": 0.05,
+    "t_final": 300.0,
+    "mission": {
+      "space_boundary_altitude_m": 100000.0,
+      "min_terminal_altitude_m": 1200.0,
+      "max_terminal_altitude_m": 6000.0,
+      "min_terminal_vz_mps": 120.0,
+      "max_terminal_vz_mps": 900.0,
+      "min_terminal_vx_mps": 20.0,
+      "max_terminal_vx_mps": 700.0,
+      "min_flight_path_angle_deg": 8.0,
+      "max_flight_path_angle_deg": 80.0,
+      "max_q_pa": 40000.0,
+      "max_g_load": 5.5,
+      "max_terminal_downrange_m": 10000.0,
+      "target_altitude_m": 2500.0,
+      "target_vx_mps": 250.0,
+      "target_vz_mps": 450.0,
+      "target_downrange_m": 1500.0,
+      "max_fuel_fraction_used": 1.0
+    },
+    "atmosphere": {
+      "randomize": true,
+      "density_scale_min": 0.9,
+      "density_scale_max": 1.1,
+      "scale_height_min_m": 7500.0,
+      "scale_height_max_m": 9500.0,
+      "wind_bias_x_min_mps": -25.0,
+      "wind_bias_x_max_mps": 25.0,
+      "wind_bias_y_min_mps": -15.0,
+      "wind_bias_y_max_mps": 15.0,
+      "wind_shear_x_min_mps": -45.0,
+      "wind_shear_x_max_mps": 45.0,
+      "wind_shear_y_min_mps": -25.0,
+      "wind_shear_y_max_mps": 25.0,
+      "gust_amp_x_min_mps": 0.0,
+      "gust_amp_x_max_mps": 12.0,
+      "gust_amp_y_min_mps": 0.0,
+      "gust_amp_y_max_mps": 8.0,
+      "gust_freq_x_hz": 0.08,
+      "gust_freq_y_hz": 0.11
+    }
+  }
+}

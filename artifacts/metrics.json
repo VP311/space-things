@@ -1,9 +1,16 @@
 {
-  "max_altitude_m": -0.024516625329852104,
-  "max_q_pa": 11.926779747009277,
-  "apogee_time_s": 0.05000000074505806,
-  "time_to_burnout_s": NaN,
-  "total_downrange_m": 0.0,
+  "max_altitude_m": 1556.741943359375,
+  "max_q_pa": 29571.57421875,
+  "max_g_load": 5.312415250298523,
+  "apogee_time_s": 37.599998474121094,
+  "time_to_burnout_s": 27.549999237060547,
+  "total_downrange_m": 1774.3011474609375,
   "crash": true,
-  "success": false
+  "hard_violation": false,
+  "success": false,
+  "terminal_altitude_m": -9.235649644919521,
+  "terminal_vx_mps": -70.67837261492076,
+  "terminal_vz_mps": -155.1336496140313,
+  "terminal_flight_path_angle_deg": -65.39339619068235,
+  "fuel_used_fraction": 1.0
 }

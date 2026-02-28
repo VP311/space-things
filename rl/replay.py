@@ -8,32 +8,51 @@ from pathlib import Path
 import numpy as np
 from stable_baselines3 import PPO
 
-from config.defaults import EnvConfig, default_vehicle_params
+from config.defaults import AtmosphereConfig, EnvConfig, MissionConfig, default_vehicle_params
 from rl.env import RocketAscentEnv
 
 
+def _resolve_model_path(preferred_path: str) -> str:
+    preferred = Path(preferred_path)
+    best = Path("artifacts/best_model/best_model.zip")
+    if preferred.exists():
+        return str(preferred)
+    if best.exists():
+        return str(best)
+    return str(preferred)
+
+
 def replay(
-    model_path: str = "artifacts/ppo_rocket.zip",
+    model_path: str = "artifacts/best_model/best_model.zip",
     telemetry_path: str = "artifacts/telemetry.npz",
     metrics_path: str = "artifacts/metrics.json",
 ) -> tuple[Path, Path]:
     params = default_vehicle_params()
     cfg = EnvConfig()
+    mission = MissionConfig()
+    atmosphere_cfg = AtmosphereConfig()
     env = RocketAscentEnv(
         params=params,
+        mission=mission,
+        atmosphere_cfg=atmosphere_cfg,
         dt=cfg.dt,
         t_final=cfg.t_final,
-        q_limit=cfg.q_limit,
-        target_apogee=cfg.target_apogee,
         record=True,
     )
-    model = PPO.load(model_path)
+    resolved_model_path = _resolve_model_path(model_path)
+    model = PPO.load(resolved_model_path)
 
     obs, info = env.reset(seed=0, options={"record": True})
     terminated = False
     truncated = False
     while not (terminated or truncated):
-        action, _ = model.predict(obs, deterministic=True)
+        try:
+            action, _ = model.predict(obs, deterministic=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "Loaded policy is incompatible with current environment. "
+                "Retrain with `python3 -m rl.train` before replay."
+            ) from exc
         obs, reward, terminated, truncated, info = env.step(action)
         _ = reward
 
@@ -81,11 +100,18 @@ def replay(
     metrics = {
         "max_altitude_m": max_altitude,
         "max_q_pa": max_q_dyn,
+        "max_g_load": float(info.get("max_g_load", 0.0)),
         "apogee_time_s": apogee_time,
         "time_to_burnout_s": time_to_burnout,
         "total_downrange_m": total_downrange,
         "crash": bool(info.get("crash", False)),
-        "success": bool(info.get("apogee_reached", False)),
+        "hard_violation": bool(info.get("hard_violation", False)),
+        "success": bool(info.get("success", False)),
+        "terminal_altitude_m": float(info.get("altitude_m", 0.0)),
+        "terminal_vx_mps": float(info.get("vx_mps", 0.0)),
+        "terminal_vz_mps": float(info.get("vz_mps", 0.0)),
+        "terminal_flight_path_angle_deg": float(info.get("flight_path_angle_deg", 0.0)),
+        "fuel_used_fraction": float(info.get("fuel_used_fraction", 0.0)),
     }
 
     metrics_out = Path(metrics_path)
@@ -96,13 +122,19 @@ def replay(
     print(f"saved metrics: {metrics_out}")
     print(f"max altitude: {max_altitude:.3f} m")
     print(f"max q_dyn: {max_q_dyn:.3f} Pa")
+    print(f"max g-load: {metrics['max_g_load']:.3f}")
     print(f"apogee time: {apogee_time:.3f} s")
     if np.isfinite(time_to_burnout):
         print(f"time to burnout: {time_to_burnout:.3f} s")
     else:
         print("time to burnout: not reached")
     print(f"total downrange: {total_downrange:.3f} m")
-    print(f"terminal: crash={metrics['crash']} success={metrics['success']}")
+    print(
+        "terminal: "
+        f"crash={metrics['crash']} "
+        f"hard_violation={metrics['hard_violation']} "
+        f"success={metrics['success']}"
+    )
     return telemetry_out, metrics_out
 
 

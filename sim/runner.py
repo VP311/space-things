@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from sim.atmosphere import density
+from sim.atmosphere import AtmosphereProfile, density, wind_velocity
 from sim.dynamics import step
 from sim.vehicle import Control, RocketState, VehicleParams
 
@@ -29,12 +29,14 @@ def compute_telemetry(
     control: Control,
     params: VehicleParams,
     t: float = 0.0,
+    atmosphere: AtmosphereProfile | None = None,
 ) -> Telemetry:
     del params  # Reserved for future telemetry fields.
     altitude = float(state.pos[2])
     speed = float(np.linalg.norm(state.vel))
-    rho = density(altitude)
-    q_dyn = 0.5 * rho * speed * speed
+    rho = density(altitude, profile=atmosphere)
+    v_air = state.vel - wind_velocity(altitude, t=t, profile=atmosphere)
+    q_dyn = 0.5 * rho * float(np.dot(v_air, v_air))
     return Telemetry(
         t=float(t),
         pos=state.pos.copy(),

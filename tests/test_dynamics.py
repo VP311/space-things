@@ -89,6 +89,20 @@ class TestDynamics(unittest.TestCase):
 
         self.assertGreater(next_state.vel[2], 0.0)
 
+    def test_zero_gimbal_has_no_spurious_torque(self) -> None:
+        state = RocketState(
+            pos=np.array([0.0, 0.0, 0.0], dtype=float),
+            vel=np.array([0.0, 0.0, 0.0], dtype=float),
+            quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=float),
+            omega=np.array([0.0, 0.0, 0.0], dtype=float),
+            mass=3.0e4,
+        )
+        control = Control(throttle=1.0, gimbal_pitch=0.0, gimbal_yaw=0.0)
+
+        next_state = step(state, control, self.params, self.dt)
+
+        self.assertTrue(np.allclose(next_state.omega, np.zeros(3), atol=1e-9))
+
 
 if __name__ == "__main__":
     unittest.main()

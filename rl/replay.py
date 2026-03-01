@@ -45,6 +45,12 @@ def replay(
     obs, info = env.reset(seed=0, options={"record": True})
     terminated = False
     truncated = False
+    reward_progress: list[float] = []
+    reward_q_pen: list[float] = []
+    reward_g_pen: list[float] = []
+    reward_fuel_pen: list[float] = []
+    reward_tilt_pen: list[float] = []
+    reward_smooth_pen: list[float] = []
     while not (terminated or truncated):
         try:
             action, _ = model.predict(obs, deterministic=True)
@@ -55,6 +61,13 @@ def replay(
             ) from exc
         obs, reward, terminated, truncated, info = env.step(action)
         _ = reward
+        comps = info.get("reward_components_step", {})
+        reward_progress.append(float(comps.get("progress", 0.0)))
+        reward_q_pen.append(float(comps.get("q_pen", 0.0)))
+        reward_g_pen.append(float(comps.get("g_pen", 0.0)))
+        reward_fuel_pen.append(float(comps.get("fuel_pen", 0.0)))
+        reward_tilt_pen.append(float(comps.get("tilt_pen", 0.0)))
+        reward_smooth_pen.append(float(comps.get("smooth_pen", 0.0)))
 
     if env.telemetry is None or not env.telemetry:
         raise RuntimeError("No telemetry collected during replay.")
@@ -87,6 +100,12 @@ def replay(
         mass=mass,
         throttle=throttle,
         gimbal_pitch=gimbal_pitch,
+        reward_progress=np.array(reward_progress, dtype=np.float32),
+        reward_q_pen=np.array(reward_q_pen, dtype=np.float32),
+        reward_g_pen=np.array(reward_g_pen, dtype=np.float32),
+        reward_fuel_pen=np.array(reward_fuel_pen, dtype=np.float32),
+        reward_tilt_pen=np.array(reward_tilt_pen, dtype=np.float32),
+        reward_smooth_pen=np.array(reward_smooth_pen, dtype=np.float32),
     )
 
     max_altitude = float(np.max(z))

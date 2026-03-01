@@ -60,8 +60,8 @@ class TestEnvironmentMission(unittest.TestCase):
         _, _ = env.reset(seed=7)
 
         env.state = RocketState(
-            pos=np.array([0.0, 0.0, mission.space_boundary_altitude_m + 100.0], dtype=float),
-            vel=np.array([mission.target_vx_mps, 0.0, mission.target_vz_mps], dtype=float),
+            pos=np.array([mission.target_downrange_m, 0.0, mission.target_altitude_m + 100.0], dtype=float),
+            vel=np.array([mission.target_vx_mps, 0.0, 40.0], dtype=float),
             quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=float),
             omega=np.array([0.0, 0.0, 0.0], dtype=float),
             mass=self.params.dry_mass + 0.2 * self.params.prop_mass,
@@ -77,8 +77,8 @@ class TestEnvironmentMission(unittest.TestCase):
 
         env.max_q_seen = mission.max_q_pa * 0.9
         env.state = RocketState(
-            pos=np.array([0.0, 0.0, mission.space_boundary_altitude_m - 1.0], dtype=float),
-            vel=np.array([mission.target_vx_mps, 0.0, mission.target_vz_mps], dtype=float),
+            pos=np.array([mission.target_downrange_m, 0.0, mission.target_altitude_m - 1.0], dtype=float),
+            vel=np.array([mission.target_vx_mps, 0.0, 40.0], dtype=float),
             quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=float),
             omega=np.array([0.0, 0.0, 0.0], dtype=float),
             mass=self.params.dry_mass + 0.2 * self.params.prop_mass,
@@ -92,8 +92,8 @@ class TestEnvironmentMission(unittest.TestCase):
             atmosphere_cfg=AtmosphereConfig(randomize=False),
         )
         obs, _ = env.reset(seed=11)
-        self.assertEqual(obs.shape, (20,))
-        self.assertEqual(env.observation_space.shape, (20,))
+        self.assertEqual(obs.shape, (18,))
+        self.assertEqual(env.observation_space.shape, (18,))
 
     def test_burnout_transitions_to_coast_instead_of_immediate_terminate(self) -> None:
         mission = MissionConfig()

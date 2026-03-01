@@ -1,14 +1,17 @@
 {
-  "total_timesteps": 1000000,
+  "total_timesteps": 500000,
   "n_envs": 4,
+  "initial_target_altitude_m": 2000.0,
+  "curriculum_enabled": true,
   "ppo": {
-    "n_steps": 1024,
-    "batch_size": 256,
-    "gamma": 0.99,
-    "gae_lambda": 0.95,
-    "learning_rate": 0.0003,
-    "ent_coef": 0.0,
+    "n_steps": 4096,
+    "batch_size": 512,
+    "gamma": 0.999,
+    "gae_lambda": 0.97,
+    "learning_rate": 0.00025,
+    "ent_coef": 0.002,
     "clip_range": 0.2,
+    "target_kl": 0.03,
     "net_arch": [
       256,
       128
@@ -18,9 +21,19 @@
     "eval_freq_steps": 100000,
     "eval_episodes": 20
   },
+  "curriculum": {
+    "enabled": true,
+    "initial_target_altitude_m": 2000.0,
+    "max_target_altitude_m": 120000.0,
+    "success_threshold": 0.7,
+    "altitude_ratio_threshold": 0.85,
+    "growth_factor": 1.2,
+    "window_episodes": 40,
+    "start_altitude_fraction": 0.65
+  },
   "env": {
     "dt": 0.05,
-    "t_final": 300.0,
+    "t_final": 650.0,
     "mission": {
       "space_boundary_altitude_m": 100000.0,
       "min_terminal_altitude_m": 1200.0,
@@ -31,6 +44,7 @@
       "max_terminal_vx_mps": 700.0,
       "min_flight_path_angle_deg": 8.0,
       "max_flight_path_angle_deg": 80.0,
+      "max_terminal_abs_vz_mps": 120.0,
       "max_q_pa": 40000.0,
       "max_g_load": 5.5,
       "max_terminal_downrange_m": 10000.0,

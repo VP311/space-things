@@ -33,6 +33,7 @@ class CurriculumManager:
     growth_factor: float
     success_threshold: float
     altitude_ratio_threshold: float
+    altitude_ratio_upper_bound: float
     window_episodes: int
     start_altitude_fraction: float
 
@@ -49,7 +50,10 @@ class CurriculumManager:
 
         rolling_success = sum(self.success_history) / len(self.success_history)
         rolling_alt_ratio = sum(self.altitude_ratio_history) / len(self.altitude_ratio_history)
-        if rolling_success < self.success_threshold and rolling_alt_ratio < self.altitude_ratio_threshold:
+        # Only allow alt_ratio to trigger promotion when the rocket is genuinely near the
+        # target (not just ballistically overshooting a too-easy target).
+        alt_ratio_near_target = self.altitude_ratio_threshold <= rolling_alt_ratio <= self.altitude_ratio_upper_bound
+        if rolling_success < self.success_threshold and not alt_ratio_near_target:
             return False, self.current_target_m
 
         next_target = min(self.current_target_m * self.growth_factor, self.max_target_m)
@@ -178,6 +182,8 @@ def train(
     n_envs: int | None = None,
     initial_target_altitude_m: float | None = None,
     curriculum_enabled: bool | None = None,
+    load_model_path: str | None = None,
+    load_vecnorm_path: str | None = None,
 ) -> Path:
     env_cfg = EnvConfig()
     mission = MissionConfig()
@@ -192,7 +198,7 @@ def train(
     )
     use_curriculum = curriculum_cfg.enabled if curriculum_enabled is None else bool(curriculum_enabled)
 
-    train_env = make_vec_env(
+    raw_train_env = make_vec_env(
         lambda: _build_env(
             env_cfg,
             mission,
@@ -203,7 +209,12 @@ def train(
         n_envs=num_envs,
         seed=ppo_cfg.seed,
     )
-    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
+    if load_vecnorm_path is not None:
+        train_env = VecNormalize.load(load_vecnorm_path, raw_train_env)
+        train_env.training = True
+        train_env.norm_reward = True
+    else:
+        train_env = VecNormalize(raw_train_env, norm_obs=True, norm_reward=True, clip_obs=10.0, clip_reward=10.0)
 
     eval_env = make_vec_env(
         lambda: _build_env(
@@ -248,6 +259,7 @@ def train(
             growth_factor=curriculum_cfg.growth_factor,
             success_threshold=curriculum_cfg.success_threshold,
             altitude_ratio_threshold=curriculum_cfg.altitude_ratio_threshold,
+            altitude_ratio_upper_bound=curriculum_cfg.altitude_ratio_upper_bound,
             window_episodes=curriculum_cfg.window_episodes,
             start_altitude_fraction=curriculum_cfg.start_altitude_fraction,
         )
@@ -272,22 +284,31 @@ def train(
         ]
     )
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=train_env,
-        n_steps=ppo_cfg.n_steps,
-        batch_size=ppo_cfg.batch_size,
-        gamma=ppo_cfg.gamma,
-        gae_lambda=ppo_cfg.gae_lambda,
-        learning_rate=ppo_cfg.learning_rate,
-        ent_coef=ppo_cfg.ent_coef,
-        clip_range=ppo_cfg.clip_range,
-        policy_kwargs={"net_arch": list(ppo_cfg.net_arch)},
-        target_kl=ppo_cfg.target_kl,
-        tensorboard_log=tensorboard_log,
-        seed=ppo_cfg.seed,
-        verbose=1,
-    )
+    if load_model_path is not None:
+        model = PPO.load(
+            load_model_path,
+            env=train_env,
+            tensorboard_log=tensorboard_log,
+            verbose=1,
+        )
+        print(f"Warm-started from {load_model_path}")
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=train_env,
+            n_steps=ppo_cfg.n_steps,
+            batch_size=ppo_cfg.batch_size,
+            gamma=ppo_cfg.gamma,
+            gae_lambda=ppo_cfg.gae_lambda,
+            learning_rate=ppo_cfg.learning_rate,
+            ent_coef=ppo_cfg.ent_coef,
+            clip_range=ppo_cfg.clip_range,
+            policy_kwargs={"net_arch": list(ppo_cfg.net_arch)},
+            target_kl=ppo_cfg.target_kl,
+            tensorboard_log=tensorboard_log,
+            seed=ppo_cfg.seed,
+            verbose=1,
+        )
 
     run_config = {
         "total_timesteps": run_steps,
@@ -349,6 +370,8 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable curriculum promotion and keep fixed target altitude",
     )
+    parser.add_argument("--load-model", type=str, default=None, help="Path to model zip for warm-start")
+    parser.add_argument("--load-vecnorm", type=str, default=None, help="Path to vecnormalize pkl for warm-start")
     return parser.parse_args()
 
 
@@ -359,4 +382,6 @@ if __name__ == "__main__":
         n_envs=args.n_envs,
         initial_target_altitude_m=args.initial_target_altitude_m,
         curriculum_enabled=False if args.disable_curriculum else None,
+        load_model_path=args.load_model,
+        load_vecnorm_path=args.load_vecnorm,
     )

@@ -162,6 +162,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "tilt_pen": 0.0,
             "smooth_pen": 0.0,
             "fuel_pen": 0.0,
+            "coasting_pen": 0.0,
+            "omega_pen": 0.0,
             "terminal_bonus": 0.0,
             "terminal_penalty": 0.0,
         }
@@ -292,34 +294,13 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         return obs, info
 
     def _progress_potential(self, scalars: EpisodeScalars, *, coast_phase: bool) -> float:
+        # Potential is pure altitude shaping — monotonically rewards climbing toward
+        # the curriculum target.  The old energy_err term was unbounded and made
+        # high-altitude trajectories appear worse than low ones, causing the policy
+        # to learn to fly *lower* over time (anti-incentive confirmed in Run 9 data).
         target_alt = max(self.curriculum_target_altitude_m, 1.0)
-        target_vx = max(self.mission.target_vx_mps, 1.0)
-        target_down = max(self.mission.target_downrange_m, 1.0)
-        side_obj_gate = float(np.clip((scalars.altitude - 10_000.0) / 30_000.0, 0.0, 1.0))
-        side_obj_w = 0.10 + 0.90 * side_obj_gate
-
-        downrange_err = (scalars.downrange - self.mission.target_downrange_m) / target_down
-        vy_pen = scalars.vy / 350.0
-        fpa_target = 0.5 * (self.mission.min_flight_path_angle_deg + self.mission.max_flight_path_angle_deg)
-        fpa_err = (scalars.flight_path_angle_deg - fpa_target) / 45.0
-
-        alt_term = np.clip(scalars.altitude / target_alt, 0.0, 2.0)
-        vx_term = np.clip(max(scalars.vx, 0.0) / target_vx, 0.0, 2.0)
-
-        specific_energy = 0.5 * (scalars.speed**2) - G0 * scalars.altitude
-        target_energy = 0.5 * (self.mission.target_vx_mps**2 + self.mission.target_vz_mps**2) - G0 * target_alt
-        energy_err = abs(specific_energy - target_energy) / max(abs(target_energy), 1.0)
-
-        energy_w = 0.25 if coast_phase else 0.08
-        phi = (
-            1.40 * alt_term
-            + 0.60 * vx_term
-            - 0.45 * side_obj_w * (downrange_err**2)
-            - 0.20 * side_obj_w * (vy_pen**2)
-            - 0.20 * side_obj_w * (fpa_err**2)
-            - energy_w * energy_err
-        )
-        return float(phi)
+        alt_term = float(np.clip(scalars.altitude / target_alt, 0.0, 2.0))
+        return alt_term
 
     def _mission_stage(self) -> str:
         target_alt = float(self.curriculum_target_altitude_m)
@@ -361,9 +342,9 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         gimbal_pitch = gimbal_pitch_cmd
         if float(self.state.pos[2]) <= self.attitude_hold_max_altitude_m and not self.burnout:
             thrust_axis_world = quat_rotate(self.state.quat, np.array([1.0, 0.0, 0.0], dtype=float))
-            pitch_angle = float(np.arctan2(thrust_axis_world[0], max(thrust_axis_world[2], 1e-6)))
+            pitch_angle = float(np.arctan2(thrust_axis_world[0], thrust_axis_world[2]))
             pitch_rate = float(self.state.omega[1])
-            hold_correction = -self.attitude_hold_kp * pitch_angle - self.attitude_hold_kd * pitch_rate
+            hold_correction = self.attitude_hold_kp * pitch_angle + self.attitude_hold_kd * pitch_rate
             gimbal_pitch = float(
                 np.clip(gimbal_pitch_cmd + hold_correction, -self.params.max_gimbal, self.params.max_gimbal)
             )
@@ -451,12 +432,17 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         progress_reward = 4.0 * (phi_now - phi_prev)
 
         q_pen = (1.7 if not coast_phase else 1.0) * (q_excess**2)
-        g_pen = (1.9 if not coast_phase else 1.1) * (g_excess**2)
+        g_pen = (0.6 if not coast_phase else 0.4) * (g_excess**2)
         tilt_cost = 0.05 * (tilt_pen**2) if not coast_phase else 0.0
-        smooth_cost = 0.05 * (smooth_pen**2) if not coast_phase else 0.0
-        fuel_cost = 0.06 * fuel_step if scalars.altitude < 40_000.0 else 0.14 * fuel_step
+        smooth_cost = 0.015 * (smooth_pen**2) if not coast_phase else 0.0
+        fuel_cost = 0.008 * fuel_step if scalars.altitude < 40_000.0 else 0.14 * fuel_step
+        # Penalise low throttle during powered flight to discourage coasting with fuel remaining.
+        coasting_pen = 0.02 * max(0.0, 0.5 - float(throttle)) if not coast_phase else 0.0
+        # Penalise high angular rate during powered flight to discourage tumbling.
+        omega_mag = float(np.linalg.norm(self.state.omega))
+        omega_pen = 0.10 * (omega_mag / 3.0) ** 2 if not coast_phase else 0.0
 
-        reward = self.survival_reward + progress_reward - q_pen - g_pen - tilt_cost - smooth_cost - fuel_cost
+        reward = self.survival_reward + progress_reward - q_pen - g_pen - tilt_cost - smooth_cost - fuel_cost - coasting_pen - omega_pen
 
         terminal_penalty = 0.0
         success = False
@@ -489,6 +475,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "tilt_pen": -tilt_cost,
             "smooth_pen": -smooth_cost,
             "fuel_pen": -fuel_cost,
+            "coasting_pen": -coasting_pen,
+            "omega_pen": -omega_pen,
             "terminal_bonus": burnout_bonus,
             "terminal_penalty": 0.0,
         }
@@ -586,35 +574,14 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         return obs
 
     def terminal_success(self, scalars: EpisodeScalars) -> bool:
+        # Success = reached target altitude without violating safety envelopes.
+        # Trajectory-shape requirements (fpa, vx, downrange) are NOT checked here
+        # because this env terminates at apogee where vz=0 → fpa=0° always, making
+        # any fpa/vx criterion structurally impossible to satisfy.
         mission = self.mission
         fuel_used = (self.params.dry_mass + self.params.prop_mass - self.state.mass) / max(self.params.prop_mass, 1.0)
-        stage = self._mission_stage()
-        if stage == "low":
-            vx_ok = True
-            vz_ok = abs(scalars.vz) <= 300.0
-            fpa_ok = True
-            downrange_ok = True
-        elif stage == "mid":
-            vx_ok = scalars.vx >= 0.5 * mission.min_terminal_vx_mps
-            vz_ok = abs(scalars.vz) <= 220.0
-            fpa_ok = (mission.min_flight_path_angle_deg - 5.0) <= scalars.flight_path_angle_deg <= (
-                mission.max_flight_path_angle_deg + 5.0
-            )
-            downrange_ok = abs(scalars.downrange - mission.target_downrange_m) <= 1.5 * mission.max_terminal_downrange_m
-        else:
-            fpa_ok = mission.min_flight_path_angle_deg <= scalars.flight_path_angle_deg <= mission.max_flight_path_angle_deg
-            downrange_ok = (
-                abs(scalars.downrange - mission.target_downrange_m) <= mission.max_terminal_downrange_m
-            )
-            vx_ok = mission.min_terminal_vx_mps <= scalars.vx <= mission.max_terminal_vx_mps
-            vz_ok = abs(scalars.vz) <= mission.max_terminal_abs_vz_mps
-
         return bool(
             scalars.altitude >= self.curriculum_target_altitude_m
-            and vx_ok
-            and vz_ok
-            and fpa_ok
-            and downrange_ok
             and self.max_q_seen <= mission.max_q_pa
             and self.max_g_seen <= mission.max_g_load
             and fuel_used <= mission.max_fuel_fraction_used

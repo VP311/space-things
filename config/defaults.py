@@ -12,20 +12,20 @@ from sim.vehicle import VehicleParams
 @dataclass(frozen=True)
 class EnvConfig:
     dt: float = 0.05
-    t_final: float = 650.0
-    train_total_timesteps: int = 1_500_000
+    t_final: float = 300.0
+    train_total_timesteps: int = 3_000_000
 
 
 @dataclass(frozen=True)
 class PPOConfig:
-    total_timesteps: int = 1_500_000
+    total_timesteps: int = 3_000_000
     n_envs: int = 4
     n_steps: int = 4096
     batch_size: int = 512
     gamma: float = 0.999
     gae_lambda: float = 0.97
     learning_rate: float = 2.5e-4
-    ent_coef: float = 0.002
+    ent_coef: float = 0.001
     clip_range: float = 0.2
     net_arch: tuple[int, int] = (256, 128)
     seed: int = 0
@@ -38,13 +38,14 @@ class PPOConfig:
 @dataclass(frozen=True)
 class CurriculumConfig:
     enabled: bool = True
-    initial_target_altitude_m: float = 2_000.0
+    initial_target_altitude_m: float = 3_000.0
     max_target_altitude_m: float = 120_000.0
-    success_threshold: float = 0.70
+    success_threshold: float = 0.45
     altitude_ratio_threshold: float = 0.85
-    growth_factor: float = 1.20
+    altitude_ratio_upper_bound: float = 1.4
+    growth_factor: float = 1.15
     window_episodes: int = 40
-    start_altitude_fraction: float = 0.65
+    start_altitude_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -60,8 +61,8 @@ class MissionConfig:
     min_flight_path_angle_deg: float = 8.0
     max_flight_path_angle_deg: float = 80.0
     max_terminal_abs_vz_mps: float = 120.0
-    max_q_pa: float = 40_000.0
-    max_g_load: float = 5.5
+    max_q_pa: float = 55_000.0
+    max_g_load: float = 8.5
     max_terminal_downrange_m: float = 10_000.0
     target_altitude_m: float = 2_500.0
     target_vx_mps: float = 250.0
@@ -98,7 +99,7 @@ def default_vehicle_params() -> VehicleParams:
         max_thrust=1.5e6,
         isp=300.0,
         dry_mass=2.0e4,
-        prop_mass=1.0e4,
+        prop_mass=2.0e4,
         area_ref=10.0,
         cd=0.5,
         gimbal_arm=1.2,

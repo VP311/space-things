@@ -30,7 +30,7 @@
       "id": "S2",
       "title": "Measure and log velocity at burnout per episode",
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "type": "observability",
       "description": "Add velocity_at_burnout_mps to episode_summaries.jsonl. This is a pure observability change — no reward logic touched.",
       "hypothesis": "Mean throttle is 0.249 and burnout altitude is 23.9km. At 24.9% throttle, effective TWR ≈ 0.95g — the rocket is barely climbing. If velocity at burnout is much lower than the ~1,800 m/s needed to coast to 100km, this confirms the policy is leaving ΔV on the table due to over-throttle-suppression from q fear. This measurement will determine whether S4/S5 (throttle shaping) are the right interventions.",

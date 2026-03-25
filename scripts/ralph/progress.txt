@@ -76,3 +76,31 @@ q_pen, smooth_pen, survival, terminal_bonus, terminal_penalty, tilt_pen
 - Hypothesis valid (analysis accurately reflects dynamics): 9/10
 
 ---
+
+## 2026-03-25 - S2: Measure and log velocity at burnout per episode
+
+### What was done
+- Added `velocity_at_burnout_mps` (total speed) and `vz_at_burnout_mps` (vertical component) to `env.py info_dict()`
+- Both derived from `self.burnout_scalars.speed` and `.vz` (same pattern as `altitude_at_burnout_m`)
+- Added comment: "vz_at_burnout determines apogee via vz²/2g"
+- Added both fields to `train.py _on_step()` row dict so they appear in episode_summaries.jsonl
+
+### Reasoning
+- Burnout at 24.1km avg; to coast to 100km needs vz_burnout >= sqrt(2*9.81*76,000) ~= 1,220 m/s
+- Policy reaches ~87km avg -> implies vz_burnout ~= 1,100 m/s (90% of needed)
+- Next run JSONL will show if failed episodes are velocity-limited (vz<1,100) or trajectory-limited
+- Zero-risk observability change -- no reward logic touched
+
+### Risks noted
+- None -- pure measurement. Fields show as MISSING in existing JSONL (expected, appears in next run)
+
+### Learnings for future iterations
+- burnout_scalars (EpisodeScalars) already has all velocity components (.vz, .speed, .vx, .vy)
+- Pattern for adding telemetry: (1) extract from self.burnout_scalars in info_dict(), (2) add to train.py row dict
+- env.py's info_dict() is already very long -- scan it carefully before adding to avoid duplicate names
+
+### Confidence
+- Implementation correct: 9/10
+- Hypothesis valid (measurement is useful): 10/10
+
+---

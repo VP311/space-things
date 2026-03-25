@@ -85,7 +85,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         attitude_hold_kd: float = 0.25,
         attitude_hold_max_altitude_m: float = 25_000.0,
         ascent_guard_altitude_m: float = 8_000.0,
-        ascent_guard_min_vz_mps: float = 350.0,
+        ascent_guard_min_vz_mps: float = 100.0,
         min_throttle_ascent: float = 0.72,
         coast_terminate_vz_mps: float = 0.0,
         min_coast_time_s: float = 1.0,
@@ -627,6 +627,9 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         ctrl_mean = self.control_sum / float(control_count)
         ctrl_var = np.maximum(self.control_sumsq / float(control_count) - np.square(ctrl_mean), 0.0)
         burnout_altitude = self.burnout_scalars.altitude if self.burnout_scalars is not None else np.nan
+        # vz_at_burnout determines apogee via vz²/2g; velocity_at_burnout is total speed magnitude
+        velocity_at_burnout = self.burnout_scalars.speed if self.burnout_scalars is not None else np.nan
+        vz_at_burnout = self.burnout_scalars.vz if self.burnout_scalars is not None else np.nan
         apogee_altitude = self.max_alt_seen
         time_to_apogee = np.nan
         if self.apogee_reached and self.burnout_time is not None:
@@ -644,6 +647,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "phase": "coast" if self.burnout else "powered",
             "burnout_time_s": self.burnout_time,
             "altitude_at_burnout_m": burnout_altitude,
+            "velocity_at_burnout_mps": velocity_at_burnout,
+            "vz_at_burnout_mps": vz_at_burnout,
             "altitude_at_apogee_m": apogee_altitude,
             "time_to_apogee_s": time_to_apogee,
             "altitude_m": scalars.altitude,

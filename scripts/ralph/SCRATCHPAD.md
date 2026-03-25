@@ -1,4 +1,29 @@
-# Ralph SCRATCHPAD — S1: Diagnose Run 12 and write ANALYSIS.md
+# Ralph SCRATCHPAD — S2: Measure and log velocity at burnout per episode
+
+## S2 Pre-implementation Reasoning
+
+**Story:** Add `velocity_at_burnout_mps` and `vz_at_burnout_mps` to episode_summaries.jsonl.
+
+**Hypothesis:** Burnout at 24.1km with mean throttle 0.249 → policy is either (a) velocity-limited at burnout (~1,100 m/s actual vs ~1,220 needed for 100km), or (b) trajectory-angle limited. S2 measures this directly. Key formula: to coast from altitude h_0 to h_max, need vz = sqrt(2g(h_max - h_0)).
+
+**Code path:**
+1. `env.py`: `self.burnout_scalars` is set when burnout is detected (line 386-387). It's an `EpisodeScalars` with `.vz` and `.speed` fields.
+2. `env.py info_dict()` (line 629): already extracts `burnout_altitude` from `self.burnout_scalars.altitude`. Add `.speed` and `.vz` the same way.
+3. `train.py _on_step()` (line 100-119): builds the `row` dict from `info`. Add two new fields.
+
+**Files to touch:**
+- `rl/env.py`: `info_dict()` — add 2 new fields to return dict
+- `rl/train.py`: `_on_step()` — add 2 new fields to `row` dict
+
+**Risk:** Zero — pure observability. No reward logic touched.
+
+**Confidence:**
+- Implementation correct: 9/10
+- Hypothesis valid: 10/10 (measuring is always valid)
+
+---
+
+# Previous SCRATCHPAD — S1: Diagnose Run 12 and write ANALYSIS.md
 
 ## 1. Current State Summary
 

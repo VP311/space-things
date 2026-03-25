@@ -102,6 +102,8 @@ class EpisodeSummaryCallback(BaseCallback):
                 "t": float(info.get("t", 0.0)),
                 "max_altitude_m": float(info.get("max_altitude_m", 0.0)),
                 "altitude_at_burnout_m": float(info.get("altitude_at_burnout_m", float("nan"))),
+                "velocity_at_burnout_mps": float(info.get("velocity_at_burnout_mps", float("nan"))),
+                "vz_at_burnout_mps": float(info.get("vz_at_burnout_mps", float("nan"))),
                 "altitude_at_apogee_m": float(info.get("altitude_at_apogee_m", 0.0)),
                 "time_to_apogee_s": float(info.get("time_to_apogee_s", float("nan"))),
                 "max_q_dyn": float(info.get("max_q_dyn", 0.0)),

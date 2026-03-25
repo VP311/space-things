@@ -130,3 +130,32 @@ q_pen, smooth_pen, survival, terminal_bonus, terminal_penalty, tilt_pen
 - Hypothesis valid: 9/10
 
 ---
+
+## 2026-03-25 - S4: Reshape progress potential to have steeper gradient in 80-100km band
+
+### What was done
+- Changed _progress_potential() in env.py from:
+    phi = clip(alt/target, 0, 2)   [pure linear]
+  to:
+    base = clip(alt/target, 0, 1)
+    bonus = 0.5 * clip((alt - 0.8*target) / (0.2*target), 0, 1)
+    phi = base + bonus
+- Below 80% of target altitude: behavior unchanged (early curriculum stages unaffected)
+- Phi values: 50km→0.5, 80km→0.8, 85km→0.975, 90km→1.15, 95km→1.325, 100km→1.5
+- Marginal progress reward for 86km→100km: old 0.56, new 1.96 (3.5x stronger)
+
+### Reasoning
+- Run 12: progress reward only +3.0 at <80km vs +4.2 at >100km — only +1.2 difference over the full altitude range
+- Gradient in 80-100km band was 4*(1.0-0.86)/episode = 0.56, nearly same as linear everywhere else
+- New formula makes each km in 80-100km band worth 2.5x a km below 80km
+- Batched with S3 into Run 13 as PRD allows batching when user decides
+
+### Risks noted
+- Batching S3+S4 in same run: both act in same direction. If they combine to overshoot (policy ignores q in final push), we won't know which one to roll back. Acceptable risk for Run 13.
+- phi above 100km is capped at 1.5 (was 2.0 at 200km in old formula) — slight reduction in incentive for >100km overshoot, which is fine (we want exactly 100km, not more)
+
+### Confidence
+- Implementation correct: 10/10 (verified numerically: phi at 0/50/80/85/90/95/100km all correct)
+- Hypothesis valid: 7/10 (gradient flattening was contributing, but terminal penalty reduction is the primary fix)
+
+---

@@ -79,7 +79,7 @@
       "id": "S4",
       "title": "Reshape progress potential to have steeper gradient in 80-100km band",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "type": "reward-change",
       "description": "The current progress potential phi = clip(alt/target_alt, 0, 2) is linear — every kilometer of altitude gain gives the same reward regardless of how close to the target you are. The policy has settled at 86km, which gives phi=0.86 vs 100km giving phi=1.0. The reward difference per episode between 86km and 100km via progress alone is 4.0 * (1.0 - 0.86) = 0.56. This is a weak signal. Add a bonus multiplier that makes the 80-100km band give steeper rewards.",
       "hypothesis": "The policy is at a local optimum at 86km because the reward gradient is nearly flat near the target. A linear progress reward provides the same per-km incentive at 10km altitude as at 95km altitude. By steepening the gradient in the 80-100km band, we increase the marginal value of each kilometer gained near the goal, giving the policy a stronger pull toward 100km rather than settling 14km short.",

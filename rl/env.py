@@ -294,13 +294,15 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         return obs, info
 
     def _progress_potential(self, scalars: EpisodeScalars, *, coast_phase: bool) -> float:
-        # Potential is pure altitude shaping — monotonically rewards climbing toward
-        # the curriculum target.  The old energy_err term was unbounded and made
-        # high-altitude trajectories appear worse than low ones, causing the policy
-        # to learn to fly *lower* over time (anti-incentive confirmed in Run 9 data).
+        # Steeper gradient in 80-100km band to pull policy off 86km plateau.
+        # phi = linear_base + bonus, where bonus kicks in above 80% of target.
+        # Values: 50km→0.5, 80km→0.8, 85km→0.975, 90km→1.15, 95km→1.325, 100km→1.5
+        # Marginal value of 86km→100km is 3.5x stronger than the old linear formula.
+        # Below 80% of target: pure linear (early curriculum stages unaffected).
         target_alt = max(self.curriculum_target_altitude_m, 1.0)
-        alt_term = float(np.clip(scalars.altitude / target_alt, 0.0, 2.0))
-        return alt_term
+        base = float(np.clip(scalars.altitude / target_alt, 0.0, 1.0))
+        bonus = 0.5 * float(np.clip((scalars.altitude - 0.8 * target_alt) / (0.2 * target_alt), 0.0, 1.0))
+        return base + bonus
 
     def _mission_stage(self) -> str:
         target_alt = float(self.curriculum_target_altitude_m)

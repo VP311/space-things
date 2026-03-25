@@ -104,3 +104,29 @@ q_pen, smooth_pen, survival, terminal_bonus, terminal_penalty, tilt_pen
 - Hypothesis valid (measurement is useful): 10/10
 
 ---
+
+## 2026-03-25 - S3: Reduce terminal penalty coefficient to free up reward gradient
+
+### What was done
+- Changed `fail_pen = 50.0 + 25.0 * terminal_penalty` to `fail_pen = 25.0 + 10.0 * terminal_penalty` in env.py
+- Added comment explaining the reasoning (was 67% of gradient, now ~48%)
+- No other reward terms touched; success bonus (+100) and stall_pen (25.0) unchanged
+
+### Reasoning
+- Run 12 data: terminal_penalty avg -58.4, non-terminal sum +14.1 → penalty was 80% of negative signal
+- At avg err_cost=0.336: old fail_pen = 50+25*0.336 = 58.4; new = 25+10*0.336 = 28.4
+- Ratio of terminal-to-shaping drops from ~4:1 to ~2:1, allowing progress/q signals to matter more
+- Specific: at 86km miss (err=0.14 alt fraction, stage="high", total err_cost ~0.34):
+  old penalty = -(50+25*0.34) = -58.5; new = -(25+10*0.34) = -28.4 (52% reduction)
+- Falsification: if avg altitude drops (policy stops caring about reaching target) or success stays flat
+
+### Risks noted
+- Both S3 and S4 act in the same direction (amplify shaping signals) — they are being batched into Run 13
+  together since the PRD says S4 should only be added after S3 "validated or user decides to batch"
+- The stall_pen (25.0 extra for very early failures) is unchanged — maintains a strong floor penalty
+
+### Confidence
+- Implementation correct: 10/10
+- Hypothesis valid: 9/10
+
+---

@@ -453,7 +453,10 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 reward += 100.0
                 self.reward_sums["terminal_bonus"] += 100.0
             else:
-                fail_pen = 50.0 + 25.0 * terminal_penalty
+                # Reduced from (50+25*err) — was dominating 67% of gradient (avg -58.4),
+                # suppressing shaping signals. Now ~48% of total signal, amplifying
+                # progress/q feedback so policy can learn from altitude differences below target.
+                fail_pen = 25.0 + 10.0 * terminal_penalty
                 reward -= fail_pen
                 self.reward_sums["terminal_penalty"] -= fail_pen
                 if not self.burnout and self.max_alt_seen < 0.65 * self.curriculum_target_altitude_m:

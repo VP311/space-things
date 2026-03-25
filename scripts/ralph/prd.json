@@ -51,7 +51,7 @@
       "id": "S3",
       "title": "Reduce terminal penalty coefficient to free up reward gradient",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "type": "reward-change",
       "description": "The terminal failure penalty averages -57.155 per episode, vs all other reward components combined averaging +28. The penalty is -(50 + 25*altitude_error) where altitude_error = max(0, 1 - alt/target). This means the terminal outcome dominates ~67% of the total reward signal, drowning out the shaping rewards that should guide throttle and q behavior. Reduce the penalty to -(25 + 10*altitude_error).",
       "hypothesis": "When a single reward term dominates the gradient this heavily, the policy optimizes almost entirely for that term and the shaping rewards (progress, q_pen, throttle incentives) become noise. The policy at 86km accepts a -57 terminal penalty on every episode because the shaping rewards can't compensate. Reducing the terminal penalty coefficient will amplify the relative influence of progress and q shaping, allowing the policy to actually learn from altitude and q feedback rather than treating every episode as a binary win/lose.",

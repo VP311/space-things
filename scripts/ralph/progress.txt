@@ -159,3 +159,17 @@ q_pen, smooth_pen, survival, terminal_bonus, terminal_penalty, tilt_pen
 - Hypothesis valid: 7/10 (gradient flattening was contributing, but terminal penalty reduction is the primary fix)
 
 ---
+
+## 2026-03-25 - S5: Update STATUS.md with Run 12 final results and hypotheses
+
+### What was done
+- Updated Run 12 row in STATUS.md run history table with final numbers (2510 eps, 4.1% success, 87km avg)
+- Updated "Current Config" section to reflect Run 13 changes (S3/S4) and removed "RUNNING" status
+- Updated Key Architecture Notes: corrected terminal penalty formula, ascent guard velocity
+- Added "Hypotheses for Run 13" table with S3/S4 causal chains and falsification conditions
+
+### Confidence
+- Implementation correct: 10/10
+- Hypothesis valid: N/A (documentation only)
+
+---

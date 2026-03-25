@@ -1,0 +1,78 @@
+# Ralph Progress Log
+
+## Codebase Patterns
+
+### How to query episode_summaries.jsonl
+NEVER read the file directly (2.3MB). Always use `python3 -c` via Bash:
+```python
+import json
+lines = open('artifacts/episode_summaries.jsonl').readlines()
+eps = [json.loads(l) for l in lines]
+# then aggregate
+```
+
+### Episode summary structure
+Keys: altitude_at_apogee_m, altitude_at_burnout_m, altitude_ratio_to_target,
+curriculum_target_altitude_m, episode, fuel_used_fraction, gimbal_variance,
+max_altitude_m, max_g_load, max_q_dyn, mean_throttle, reward_components,
+success, t, termination_reason, throttle_variance, time_to_apogee_s
+
+reward_components keys: coasting_pen, fuel_pen, g_pen, omega_pen, progress,
+q_pen, smooth_pen, survival, terminal_bonus, terminal_penalty, tilt_pen
+
+### How reward is computed in env.py
+- step(): computes per-step reward components, accumulates into self.reward_sums
+- terminal reward: added at episode end (success +100, failure -(50+25*err))
+- info_dict() populates episode summary via train.py callback
+- _progress_potential(): phi = clip(alt/target, 0, 2) — pure altitude shaping
+
+### How telemetry fields get into episode_summaries.jsonl
+1. env.py info_dict() returns a dict with all episode stats
+2. train.py callback reads info["reward_components_cumulative"] at episode end
+3. Writes a JSON line to artifacts/episode_summaries.jsonl with flattened fields
+4. To ADD a new field: add it to info_dict() return dict in env.py, then ensure train.py callback writes it
+
+### Curriculum target
+- Set via env.set_curriculum(target_altitude_m) in train.py CurriculumManager
+- Stored as self.curriculum_target_altitude_m (float, meters)
+- Only changes when success_threshold met over rolling window
+- phi = alt / curriculum_target_altitude_m (not mission.target_altitude_m)
+
+---
+
+## 2026-03-25 - S1: Diagnose Run 12 and write ANALYSIS.md
+
+### What was done
+- Created ralph/run12-analysis-and-fixes branch from main
+- Analyzed 2510 episodes from artifacts/episode_summaries.jsonl via Python scripts
+- Wrote ANALYSIS.md at project root with:
+  - q compliance by 5 altitude bands (0-40, 40-60, 60-80, 80-100, 100+ km)
+  - Reward-vs-altitude table confirming monotonicity but near-flat gradient below target
+  - All reward component averages showing terminal_penalty = -58.4 (80% of negative signal)
+  - Success rate rolling windows (3-6.5%, no improving trend, flat from ep 1 to ep 2510)
+  - Burnout altitude stats (mean 24.1km ± 1.5km)
+  - 3 ranked hypotheses: H1 terminal penalty dominance (9/10), H3 throttle suppression (8/10), H2 flat progress gradient (7/10)
+- Updated prd.json S1 passes: true
+- Wrote SCRATCHPAD.md in scripts/ralph/
+
+### Reasoning
+- S1 is pure analysis — no code changes, creates evidence base for S2-S5
+- Key finding: curriculum target was fixed at 100km the entire run (never promoted) — policy was always trying to reach 100km but stuck at 86km
+- Key finding: reward is monotonically increasing with altitude but gradient is near-flat below target (0.35/km), then jumps +103 at 100km threshold
+- Key finding: terminal_penalty avg -58.4 dominates 80% of negative gradient → shaping signals can't pull policy off 86km plateau
+
+### Risks noted
+- q compliance is inferred from max_q_dyn (worst point per episode), not per-step compliance rate
+- Throttle analysis is at episode level; per-phase throttle (powered vs coast) would be more precise — S2 will add burnout velocity to clarify
+
+### Learnings for future iterations
+- Curriculum target was 100km throughout Run 12 (not 90km as mentioned in STATUS.md "80→92km+") — STATUS.md was written during early Run 12 and not updated at completion
+- The warm-start from Run 11 placed policy immediately at ~87km avg from episode 1 — policy never explored lower altitudes in Run 12
+- tilt_pen = -3.65 is the second largest penalty after terminal_penalty — worth monitoring if it reflects meaningful flight instability or just gimbal use
+- 99.7% of episodes terminate at apogee (correct) — only 0.3% crash (good sign)
+
+### Confidence
+- Implementation correct: 9/10
+- Hypothesis valid (analysis accurately reflects dynamics): 9/10
+
+---

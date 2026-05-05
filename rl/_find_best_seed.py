@@ -12,7 +12,7 @@ params = default_vehicle_params()
 cfg = EnvConfig()
 mission = MissionConfig()
 atm = AtmosphereConfig()
-model = PPO.load("artifacts/ppo_rocket.zip")
+model = PPO.load("artifacts/living/artifacts_train/ppo_rocket.zip")
 
 best_apogee, best_seed = 0, 0
 results = []
@@ -65,7 +65,7 @@ th = np.array([s.control.throttle     for s in samples], dtype=np.float32)
 gp = np.array([s.control.gimbal_pitch for s in samples], dtype=np.float32)
 
 zeros = np.zeros(len(t), dtype=np.float32)
-np.savez("artifacts/telemetry.npz",
+np.savez("artifacts/living/telemetry.npz",
     t=t, x=x, y=y, z=z, vx=vx, vz=vz,
     q_dyn=q, speed=sp, mass=ms, throttle=th, gimbal_pitch=gp,
     reward_progress=zeros, reward_q_pen=zeros, reward_g_pen=zeros,

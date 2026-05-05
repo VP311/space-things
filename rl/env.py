@@ -10,7 +10,7 @@ from gymnasium import spaces
 
 from config.defaults import AtmosphereConfig, MissionConfig
 from sim.atmosphere import AtmosphereProfile, density, wind_velocity
-from sim.constants import G0
+from sim.constants import G0, RHO0
 from sim.dynamics import aero_forces, step
 from sim.math3d import quat_rotate
 from sim.runner import Telemetry, compute_telemetry
@@ -30,6 +30,7 @@ class EpisodeScalars:
     wind_x: float
     wind_y: float
     g_load: float
+    rho_ratio: float
 
 
 def baseline_action(
@@ -69,12 +70,14 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
     """Falcon 9-inspired ascent env with atmospheric randomization and load constraints."""
 
     metadata = {"render_modes": []}
+    _FUEL_FRACTION_TOL = 1e-9
 
     def __init__(
         self,
         params: VehicleParams,
         mission: MissionConfig,
         atmosphere_cfg: AtmosphereConfig,
+        curriculum_milestones_m: tuple[float, ...] | None = None,
         dt: float = 0.05,
         t_final: float = 300.0,
         record: bool = False,
@@ -85,7 +88,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         attitude_hold_kd: float = 0.25,
         attitude_hold_max_altitude_m: float = 25_000.0,
         ascent_guard_altitude_m: float = 8_000.0,
-        ascent_guard_min_vz_mps: float = 350.0,
+        ascent_guard_min_vz_mps: float = 100.0,
         min_throttle_ascent: float = 0.72,
         coast_terminate_vz_mps: float = 0.0,
         min_coast_time_s: float = 1.0,
@@ -93,8 +96,12 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         start_state_randomization: bool = True,
         domain_randomization: bool = True,
         max_start_altitude_m: float = 500.0,
+        action_repeat: int = 1,
+        observation_noise_std: float = 0.0,
+        action_lag_steps: int = 0,
     ) -> None:
         super().__init__()
+        self.action_repeat = max(1, int(action_repeat))
         self.base_params = params
         self.params = params
         self.mission = mission
@@ -118,8 +125,23 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         self.start_state_randomization = bool(start_state_randomization)
         self.domain_randomization = bool(domain_randomization)
         self.max_start_altitude_m = float(max_start_altitude_m)
+        self.observation_noise_std = float(max(0.0, observation_noise_std))
+        self.action_lag_steps = int(max(0, action_lag_steps))
         self.curriculum_target_altitude_m = float(mission.target_altitude_m)
         self.curriculum_start_altitude_cap_m = float(max_start_altitude_m)
+        milestone_seed = (
+            tuple(float(m) for m in curriculum_milestones_m)
+            if curriculum_milestones_m is not None
+            else (float(mission.target_altitude_m), float(mission.space_boundary_altitude_m))
+        )
+        self.curriculum_milestones_m = tuple(
+            sorted(
+                {
+                    float(m) for m in milestone_seed
+                }
+                | {self.curriculum_target_altitude_m, float(mission.space_boundary_altitude_m)}
+            )
+        )
 
         self.action_space = spaces.Box(
             low=np.array([0.0, -self.params.max_gimbal], dtype=np.float32),
@@ -127,18 +149,20 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             dtype=np.float32,
         )
         # Fixed-scale normalized observation; include variables used by reward and success checks.
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(18,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(20,), dtype=np.float32)
 
         self.state: RocketState | None = None
         self.atmosphere_profile = AtmosphereProfile()
         self.t = 0.0
         self.prev_action = np.zeros(2, dtype=np.float32)
+        self._action_delay_buffer: list[np.ndarray] = []
         self.max_q_seen = 0.0
         self.max_g_seen = 0.0
         self.max_alt_seen = 0.0
         self.burnout = False
         self.burnout_scalars: EpisodeScalars | None = None
         self.burnout_time: float | None = None
+        self.burnout_bonus_paid = False
         self.crash = False
         self.apogee_reached = False
         self.termination_reason = "running"
@@ -157,6 +181,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         return {
             "survival": 0.0,
             "progress": 0.0,
+            "burnout_bonus": 0.0,
+            "success_bonus": 0.0,
             "q_pen": 0.0,
             "g_pen": 0.0,
             "tilt_pen": 0.0,
@@ -164,7 +190,6 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "fuel_pen": 0.0,
             "coasting_pen": 0.0,
             "omega_pen": 0.0,
-            "terminal_bonus": 0.0,
             "terminal_penalty": 0.0,
         }
 
@@ -259,12 +284,14 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         self.t = 0.0
         self.prev_action = np.array([self.min_throttle_liftoff, 0.0], dtype=np.float32)
+        self._action_delay_buffer = [self.prev_action.copy() for _ in range(self.action_lag_steps)]
         self.max_q_seen = 0.0
         self.max_g_seen = 0.0
         self.max_alt_seen = float(z0)
         self.burnout = False
         self.burnout_scalars = None
         self.burnout_time = None
+        self.burnout_bonus_paid = False
         self.crash = False
         self.apogee_reached = False
         self.termination_reason = "running"
@@ -281,7 +308,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         scalars = self.scalars(self.state)
         self.prev_potential = self._progress_potential(scalars, coast_phase=False)
 
-        obs = self.observation(scalars)
+        obs = self._observe(scalars)
         info = self.info_dict(
             scalars=scalars,
             terminated=False,
@@ -293,14 +320,115 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         )
         return obs, info
 
-    def _progress_potential(self, scalars: EpisodeScalars, *, coast_phase: bool) -> float:
-        # Potential is pure altitude shaping — monotonically rewards climbing toward
-        # the curriculum target.  The old energy_err term was unbounded and made
-        # high-altitude trajectories appear worse than low ones, causing the policy
-        # to learn to fly *lower* over time (anti-incentive confirmed in Run 9 data).
+    def _curriculum_success_band(self) -> tuple[float, float | None]:
         target_alt = max(self.curriculum_target_altitude_m, 1.0)
-        alt_term = float(np.clip(scalars.altitude / target_alt, 0.0, 2.0))
-        return alt_term
+        final_alt = max(self.mission.space_boundary_altitude_m, 1.0)
+        if target_alt >= final_alt - 1.0:
+            return target_alt, None
+        return 0.95 * target_alt, None
+
+    def _q_margin_pa(self) -> float:
+        return float(self.mission.max_q_pa - self.max_q_seen)
+
+    def _q_over_limit_fraction(self) -> float:
+        return float(max(0.0, self.max_q_seen - self.mission.max_q_pa) / max(self.mission.max_q_pa, 1.0))
+
+    def _terminal_q_failure_only(self, scalars: EpisodeScalars) -> bool:
+        min_altitude_m, max_altitude_m = self._curriculum_success_band()
+        fuel_used = (self.params.dry_mass + self.params.prop_mass - self.state.mass) / max(self.params.prop_mass, 1.0)
+        altitude_ok = scalars.altitude >= min_altitude_m and (
+            max_altitude_m is None or scalars.altitude <= max_altitude_m
+        )
+        return bool(
+            altitude_ok
+            and self.max_g_seen <= self.mission.max_g_load
+            and fuel_used <= self.mission.max_fuel_fraction_used + self._FUEL_FRACTION_TOL
+            and not self.crash
+            and self.max_q_seen > self.mission.max_q_pa
+        )
+
+    def _overshoot_penalty(self, scalars: EpisodeScalars) -> float:
+        _, max_altitude_m = self._curriculum_success_band()
+        if max_altitude_m is None:
+            return 0.0
+        overshoot_fraction = max(0.0, scalars.altitude - max_altitude_m) / max(max_altitude_m, 1.0)
+        return 8.0 * (overshoot_fraction**2)
+
+    def _q_barrier_penalty(self, q_dyn_pa: float) -> float:
+        q_limit = max(self.mission.max_q_pa, 1.0)
+        q_soft_limit = 0.92 * q_limit
+        if q_dyn_pa <= q_soft_limit:
+            return 0.0
+        if q_dyn_pa <= q_limit:
+            frac = (q_dyn_pa - q_soft_limit) / max(q_limit - q_soft_limit, 1.0)
+            return 0.8 * (frac**2)
+        frac_over = (q_dyn_pa - q_limit) / q_limit
+        return 0.8 + 30.0 * (frac_over**3)
+
+    @staticmethod
+    def _piecewise_linear_potential(x: float, knots: tuple[tuple[float, float], ...]) -> float:
+        if x <= knots[0][0]:
+            return float(knots[0][1])
+        for (x0, y0), (x1, y1) in zip(knots[:-1], knots[1:]):
+            if x <= x1:
+                span = max(x1 - x0, 1e-9)
+                t = (x - x0) / span
+                return float(y0 + t * (y1 - y0))
+        return float(knots[-1][1])
+
+    def _effective_progress_altitude(self, scalars: EpisodeScalars, *, coast_phase: bool, cap_altitude_m: float) -> float:
+        if coast_phase:
+            return float(scalars.altitude)
+        projected_apogee = scalars.altitude + (scalars.vz**2) / (2.0 * G0)
+        return float(np.clip(projected_apogee, scalars.altitude, max(cap_altitude_m, scalars.altitude)))
+
+    def _next_curriculum_milestone(self) -> float:
+        current_target = float(self.curriculum_target_altitude_m)
+        for milestone in self.curriculum_milestones_m:
+            if milestone > current_target + 1e-6:
+                return float(milestone)
+        return float(max(current_target, self.mission.space_boundary_altitude_m))
+
+    @staticmethod
+    def _carry_ratio(effective_altitude_m: float, *, start_altitude_m: float, target_altitude_m: float) -> float:
+        if target_altitude_m <= start_altitude_m + 1e-6:
+            return 1.0
+        return float(
+            np.clip(
+                (effective_altitude_m - start_altitude_m) / (target_altitude_m - start_altitude_m),
+                0.0,
+                1.0,
+            )
+        )
+
+    def _mid_stage_carry_potential(self, effective_altitude_m: float) -> float:
+        target_alt = max(self.curriculum_target_altitude_m, 1.0)
+        next_milestone = max(self._next_curriculum_milestone(), target_alt)
+        decay_start = max(1.10 * next_milestone, next_milestone + 1_000.0)
+        decay_end = max(1.80 * next_milestone, decay_start + 1_000.0)
+        knots = (
+            (target_alt, 0.0),
+            (next_milestone, 1.0),
+            (decay_start, 0.85),
+            (decay_end, 0.0),
+        )
+        return self._piecewise_linear_potential(effective_altitude_m, knots)
+
+    def _progress_potential(self, scalars: EpisodeScalars, *, coast_phase: bool) -> float:
+        # During powered flight: use projected apogee (alt + vz²/2g) so the policy
+        # receives immediate reward for building vertical energy.
+        # During coast: use actual altitude (projected apogee shrinks as vz→0).
+        target_alt = max(self.curriculum_target_altitude_m, 1.0)
+        if self.curriculum_target_altitude_m >= 88_000.0:
+            target_alt = max(self.mission.space_boundary_altitude_m, target_alt)
+        if coast_phase:
+            effective_alt = scalars.altitude
+        else:
+            projected_apogee = scalars.altitude + (scalars.vz ** 2) / (2.0 * G0)
+            effective_alt = float(np.clip(projected_apogee, scalars.altitude, target_alt * 1.5))
+        base = float(np.clip(effective_alt / target_alt, 0.0, 1.0))
+        bonus = 0.5 * float(np.clip((effective_alt - 0.8 * target_alt) / (0.2 * target_alt), 0.0, 1.0))
+        return base + bonus
 
     def _mission_stage(self) -> str:
         target_alt = float(self.curriculum_target_altitude_m)
@@ -310,7 +438,81 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             return "mid"
         return "high"
 
+    def _final_stage_active(self) -> bool:
+        return bool(self.curriculum_target_altitude_m >= self.mission.space_boundary_altitude_m - 1.0)
+
+    def _terminal_success_bonus(self, scalars: EpisodeScalars) -> float:
+        if not self._final_stage_active():
+            return 100.0
+        overshoot_ratio = float(
+            np.clip(
+                (scalars.altitude - self.mission.space_boundary_altitude_m)
+                / (0.10 * max(self.mission.space_boundary_altitude_m, 1.0)),
+                0.0,
+                1.0,
+            )
+        )
+        return 175.0 + 25.0 * overshoot_ratio
+
+    def _terminal_failure_penalty(self, scalars: EpisodeScalars, terminal_penalty: float) -> float:
+        if self._final_stage_active() and scalars.altitude < self.mission.space_boundary_altitude_m:
+            shortfall_ratio = float(
+                np.clip(
+                    (self.mission.space_boundary_altitude_m - scalars.altitude)
+                    / (0.20 * max(self.mission.space_boundary_altitude_m, 1.0)),
+                    0.0,
+                    1.0,
+                )
+            )
+            return 15.0 + 90.0 * shortfall_ratio
+        return 15.0 + 30.0 * terminal_penalty
+
+    def _burnout_energy_bonus(self) -> float:
+        if not self.burnout or self.burnout_scalars is None or self.burnout_bonus_paid:
+            return 0.0
+        if self.max_q_seen > self.mission.max_q_pa or self.max_g_seen > self.mission.max_g_load:
+            return 0.0
+
+        self.burnout_bonus_paid = True
+
+        target_alt = max(self.curriculum_target_altitude_m, 1.0)
+        projected_apogee = self.burnout_scalars.altitude + (self.burnout_scalars.vz**2) / (2.0 * G0)
+
+        if self.curriculum_target_altitude_m < 20_000.0:
+            return 0.0
+        if self.curriculum_target_altitude_m < 65_000.0:
+            carry_potential = self._mid_stage_carry_potential(projected_apogee)
+            return 10.0 * carry_potential
+
+        final_target = max(self.mission.space_boundary_altitude_m, 1.0)
+        hinge_start = 0.92 * final_target
+        hinge_width = max(final_target - hinge_start, 1.0)
+        boundary_ratio = float(np.clip((projected_apogee - hinge_start) / hinge_width, 0.0, 1.0))
+        boundary_bonus = 120.0 * (boundary_ratio**2)
+
+        overshoot_ratio = float(np.clip((projected_apogee - final_target) / (0.10 * final_target), 0.0, 1.0))
+        overshoot_bonus = 25.0 * overshoot_ratio
+
+        vz_ratio = float(np.clip((self.burnout_scalars.vz - 1_180.0) / 70.0, 0.0, 1.0))
+        vz_bonus = 35.0 * vz_ratio * boundary_ratio
+        return boundary_bonus + overshoot_bonus + vz_bonus
+
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
+        """Run action_repeat sub-steps with the same action, accumulating reward."""
+        total_reward = 0.0
+        obs: np.ndarray | None = None
+        info: dict = {}
+        terminated = False
+        truncated = False
+        for _ in range(self.action_repeat):
+            obs, reward, terminated, truncated, info = self._single_step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+        assert obs is not None
+        return obs, total_reward, terminated, truncated, info
+
+    def _single_step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         if self.state is None:
             raise RuntimeError("Call reset() before step().")
 
@@ -349,7 +551,14 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 np.clip(gimbal_pitch_cmd + hold_correction, -self.params.max_gimbal, self.params.max_gimbal)
             )
 
-        applied_action = np.array([throttle, gimbal_pitch], dtype=np.float32)
+        commanded_action = np.array([throttle, gimbal_pitch], dtype=np.float32)
+        applied_action = self._apply_action_lag(commanded_action)
+        throttle = float(applied_action[0])
+        gimbal_pitch = float(applied_action[1])
+        if self.burnout:
+            throttle = 0.0
+            applied_action = np.array([0.0, gimbal_pitch], dtype=np.float32)
+            self._action_delay_buffer = [applied_action.copy() for _ in range(self.action_lag_steps)]
         control = Control(throttle=throttle, gimbal_pitch=gimbal_pitch, gimbal_yaw=0.0)
 
         thrust_world, drag_world, q_dyn_now, _ = aero_forces(
@@ -431,7 +640,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         phi_now = self._progress_potential(scalars, coast_phase=coast_phase)
         progress_reward = 4.0 * (phi_now - phi_prev)
 
-        q_pen = (1.7 if not coast_phase else 1.0) * (q_excess**2)
+        q_pen = self._q_barrier_penalty(scalars.q_dyn)
         g_pen = (0.6 if not coast_phase else 0.4) * (g_excess**2)
         tilt_cost = 0.05 * (tilt_pen**2) if not coast_phase else 0.0
         smooth_cost = 0.015 * (smooth_pen**2) if not coast_phase else 0.0
@@ -441,35 +650,51 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         # Penalise high angular rate during powered flight to discourage tumbling.
         omega_mag = float(np.linalg.norm(self.state.omega))
         omega_pen = 0.10 * (omega_mag / 3.0) ** 2 if not coast_phase else 0.0
-
-        reward = self.survival_reward + progress_reward - q_pen - g_pen - tilt_cost - smooth_cost - fuel_cost - coasting_pen - omega_pen
+        reward = (
+            self.survival_reward
+            + progress_reward
+            - q_pen
+            - g_pen
+            - tilt_cost
+            - smooth_cost
+            - fuel_cost
+            - coasting_pen
+            - omega_pen
+        )
 
         terminal_penalty = 0.0
+        success_bonus = 0.0
+        terminal_penalty_component = 0.0
         success = False
         if terminated or truncated:
             terminal_penalty = float(np.clip(self.terminal_error_cost(scalars), 0.0, 1.0))
             success = bool(self.terminal_success(scalars))
             if success:
-                reward += 100.0
-                self.reward_sums["terminal_bonus"] += 100.0
+                success_bonus = self._terminal_success_bonus(scalars)
+                reward += success_bonus
             else:
-                fail_pen = 50.0 + 25.0 * terminal_penalty
+                # Final-stage misses need a much steeper gradient than curriculum misses.
+                fail_pen = self._terminal_failure_penalty(scalars, terminal_penalty)
+                if self._terminal_q_failure_only(scalars):
+                    fail_pen *= 1.75
                 reward -= fail_pen
-                self.reward_sums["terminal_penalty"] -= fail_pen
+                terminal_penalty_component -= fail_pen
                 if not self.burnout and self.max_alt_seen < 0.65 * self.curriculum_target_altitude_m:
                     stall_pen = 25.0
                     reward -= stall_pen
-                    self.reward_sums["terminal_penalty"] -= stall_pen
+                    terminal_penalty_component -= stall_pen
 
         burnout_bonus = 0.0
-        if self.burnout and self.burnout_scalars is not None and not (terminated or truncated):
-            burnout_ratio = self.burnout_scalars.altitude / max(self.curriculum_target_altitude_m, 1.0)
-            burnout_bonus = 0.015 * float(np.clip(burnout_ratio, 0.0, 1.0))
+        if not (terminated or truncated):
+            burnout_bonus = self._burnout_energy_bonus()
+        if burnout_bonus > 0.0:
             reward += burnout_bonus
 
         step_components = {
             "survival": self.survival_reward,
             "progress": progress_reward,
+            "burnout_bonus": burnout_bonus,
+            "success_bonus": success_bonus,
             "q_pen": -q_pen,
             "g_pen": -g_pen,
             "tilt_pen": -tilt_cost,
@@ -477,8 +702,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "fuel_pen": -fuel_cost,
             "coasting_pen": -coasting_pen,
             "omega_pen": -omega_pen,
-            "terminal_bonus": burnout_bonus,
-            "terminal_penalty": 0.0,
+            "terminal_penalty": terminal_penalty_component,
         }
         for key, value in step_components.items():
             self.reward_sums[key] += float(value)
@@ -502,7 +726,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 )
             )
 
-        obs = self.observation(scalars)
+        obs = self._observe(scalars)
         info = self.info_dict(
             scalars=scalars,
             terminated=terminated,
@@ -519,7 +743,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         speed = float(np.linalg.norm(state.vel))
         w_world = wind_velocity(altitude, t=self.t, profile=self.atmosphere_profile)
         v_air = state.vel - w_world
-        q_dyn = 0.5 * density(altitude, profile=self.atmosphere_profile) * float(np.dot(v_air, v_air))
+        rho = density(altitude, profile=self.atmosphere_profile)
+        q_dyn = 0.5 * rho * float(np.dot(v_air, v_air))
         horizontal_speed = float(np.linalg.norm(state.vel[:2]))
         gamma = float(np.rad2deg(np.arctan2(state.vel[2], max(horizontal_speed, 1e-6))))
 
@@ -535,6 +760,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             wind_x=float(w_world[0]),
             wind_y=float(w_world[1]),
             g_load=float(self.last_g_load if g_load is None else g_load),
+            rho_ratio=float(rho / RHO0),
         )
 
     def observation(self, scalars: EpisodeScalars) -> np.ndarray:
@@ -548,9 +774,18 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         omega_mag = float(np.linalg.norm(self.state.omega))
         fpa_rad = np.deg2rad(scalars.flight_path_angle_deg)
 
+        if self.burnout:
+            projected_apogee = scalars.altitude
+        else:
+            projected_apogee = scalars.altitude + (scalars.vz ** 2) / (2.0 * G0)
+        obs_target_alt = max(self.curriculum_target_altitude_m, 1.0)
+        if self.curriculum_target_altitude_m >= 88_000.0:
+            obs_target_alt = max(self.mission.space_boundary_altitude_m, obs_target_alt)
+        apogee_ratio = float(np.clip(projected_apogee / obs_target_alt, 0.0, 1.5))
+
         obs = np.array(
             [
-                scalars.altitude / max(self.curriculum_target_altitude_m, 1.0),
+                scalars.altitude / obs_target_alt,
                 scalars.vx / 3000.0,
                 scalars.vz / 2500.0,
                 scalars.speed / 3500.0,
@@ -568,10 +803,34 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 self.prev_action[0],
                 self.prev_action[1] / max(self.params.max_gimbal, 1e-6),
                 1.0 if self.burnout else 0.0,
+                scalars.rho_ratio,
+                apogee_ratio,
             ],
             dtype=np.float32,
         )
         return obs
+
+    def _observe(self, scalars: EpisodeScalars) -> np.ndarray:
+        obs = self.observation(scalars)
+        if self.observation_noise_std <= 0.0:
+            return obs
+        noise = self.np_random.normal(0.0, self.observation_noise_std, size=obs.shape).astype(np.float32)
+        return (obs + noise).astype(np.float32)
+
+    def _apply_action_lag(self, commanded_action: np.ndarray) -> np.ndarray:
+        action = np.asarray(commanded_action, dtype=np.float32).reshape(2).copy()
+        action[0] = float(np.clip(action[0], 0.0, 1.0))
+        action[1] = float(np.clip(action[1], -self.params.max_gimbal, self.params.max_gimbal))
+        if self.action_lag_steps <= 0:
+            return action
+        if len(self._action_delay_buffer) < self.action_lag_steps:
+            self._action_delay_buffer.extend(action.copy() for _ in range(self.action_lag_steps - len(self._action_delay_buffer)))
+        delayed = self._action_delay_buffer.pop(0)
+        self._action_delay_buffer.append(action)
+        delayed = np.asarray(delayed, dtype=np.float32).reshape(2).copy()
+        delayed[0] = float(np.clip(delayed[0], 0.0, 1.0))
+        delayed[1] = float(np.clip(delayed[1], -self.params.max_gimbal, self.params.max_gimbal))
+        return delayed
 
     def terminal_success(self, scalars: EpisodeScalars) -> bool:
         # Success = reached target altitude without violating safety envelopes.
@@ -580,20 +839,26 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         # any fpa/vx criterion structurally impossible to satisfy.
         mission = self.mission
         fuel_used = (self.params.dry_mass + self.params.prop_mass - self.state.mass) / max(self.params.prop_mass, 1.0)
+        min_altitude_m, max_altitude_m = self._curriculum_success_band()
         return bool(
-            scalars.altitude >= self.curriculum_target_altitude_m
+            scalars.altitude >= min_altitude_m
+            and (max_altitude_m is None or scalars.altitude <= max_altitude_m)
             and self.max_q_seen <= mission.max_q_pa
             and self.max_g_seen <= mission.max_g_load
-            and fuel_used <= mission.max_fuel_fraction_used
+            and fuel_used <= mission.max_fuel_fraction_used + self._FUEL_FRACTION_TOL
             and not self.crash
         )
 
     def terminal_error_cost(self, scalars: EpisodeScalars) -> float:
         mission = self.mission
         stage = self._mission_stage()
-        alt_err = max(0.0, self.curriculum_target_altitude_m - scalars.altitude) / max(
-            self.curriculum_target_altitude_m, 1.0
-        )
+        min_altitude_m, max_altitude_m = self._curriculum_success_band()
+        if scalars.altitude < min_altitude_m:
+            alt_err = (min_altitude_m - scalars.altitude) / max(min_altitude_m, 1.0)
+        elif max_altitude_m is not None and scalars.altitude > max_altitude_m:
+            alt_err = (scalars.altitude - max_altitude_m) / max(max_altitude_m, 1.0)
+        else:
+            alt_err = 0.0
         downrange_err = abs(scalars.downrange - mission.target_downrange_m) / max(mission.max_terminal_downrange_m, 1.0)
         vx_target = 0.5 * (mission.min_terminal_vx_mps + mission.max_terminal_vx_mps)
         vx_err = abs(scalars.vx - vx_target) / max(vx_target, 1.0)
@@ -602,13 +867,26 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         fpa_err = abs(scalars.flight_path_angle_deg - fpa_target) / max(abs(fpa_target), 1.0)
         fuel_used = (self.params.dry_mass + self.params.prop_mass - self.state.mass) / max(self.params.prop_mass, 1.0)
         fuel_err = max(0.0, fuel_used - mission.max_fuel_fraction_used)
+        q_err = self._q_over_limit_fraction()
 
         if stage == "low":
-            return float(0.80 * alt_err + 0.15 * vz_err + 0.05 * fuel_err)
+            return float(0.68 * alt_err + 0.18 * vz_err + 0.06 * q_err + 0.08 * fuel_err)
         if stage == "mid":
-            return float(0.55 * alt_err + 0.12 * downrange_err + 0.10 * vx_err + 0.13 * vz_err + 0.07 * fpa_err + 0.03 * fuel_err)
+            return float(
+                0.44 * alt_err
+                + 0.10 * downrange_err
+                + 0.08 * vx_err
+                + 0.12 * vz_err
+                + 0.06 * fpa_err
+                + 0.15 * q_err
+                + 0.05 * fuel_err
+            )
+        # At apogee termination vz=0 and fpa=0 structurally, so vx/vz/fpa/downrange
+        # errors are constant noise — altitude must dominate the gradient.
         return float(
-            0.35 * alt_err + 0.20 * downrange_err + 0.15 * vx_err + 0.15 * vz_err + 0.10 * fpa_err + 0.05 * fuel_err
+            0.85 * alt_err
+            + 0.10 * q_err
+            + 0.05 * fuel_err
         )
 
     def info_dict(
@@ -627,6 +905,9 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
         ctrl_mean = self.control_sum / float(control_count)
         ctrl_var = np.maximum(self.control_sumsq / float(control_count) - np.square(ctrl_mean), 0.0)
         burnout_altitude = self.burnout_scalars.altitude if self.burnout_scalars is not None else np.nan
+        # vz_at_burnout determines apogee via vz²/2g; velocity_at_burnout is total speed magnitude
+        velocity_at_burnout = self.burnout_scalars.speed if self.burnout_scalars is not None else np.nan
+        vz_at_burnout = self.burnout_scalars.vz if self.burnout_scalars is not None else np.nan
         apogee_altitude = self.max_alt_seen
         time_to_apogee = np.nan
         if self.apogee_reached and self.burnout_time is not None:
@@ -644,6 +925,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "phase": "coast" if self.burnout else "powered",
             "burnout_time_s": self.burnout_time,
             "altitude_at_burnout_m": burnout_altitude,
+            "velocity_at_burnout_mps": velocity_at_burnout,
+            "vz_at_burnout_mps": vz_at_burnout,
             "altitude_at_apogee_m": apogee_altitude,
             "time_to_apogee_s": time_to_apogee,
             "altitude_m": scalars.altitude,
@@ -659,6 +942,8 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
             "downrange_m": scalars.downrange,
             "max_altitude_m": self.max_alt_seen,
             "max_q_dyn": self.max_q_seen,
+            "q_margin_pa": self._q_margin_pa(),
+            "q_over_limit_fraction": self._q_over_limit_fraction(),
             "max_g_load": self.max_g_seen,
             "fuel_used_fraction": float(fuel_used),
             "apogee_reached": self.apogee_reached,
@@ -682,6 +967,7 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 "isp": self.params.isp,
                 "dry_mass": self.params.dry_mass,
                 "prop_mass": self.params.prop_mass,
+                "area_ref": self.params.area_ref,
                 "cd": self.params.cd,
             },
             "atmosphere": {
@@ -691,6 +977,10 @@ class RocketAscentEnv(gym.Env[np.ndarray, np.ndarray]):
                 "wind_bias_y_mps": self.atmosphere_profile.wind_bias_y_mps,
                 "wind_shear_x_mps": self.atmosphere_profile.wind_shear_x_mps,
                 "wind_shear_y_mps": self.atmosphere_profile.wind_shear_y_mps,
+            },
+            "stress": {
+                "observation_noise_std": self.observation_noise_std,
+                "action_lag_steps": self.action_lag_steps,
             },
         }
 

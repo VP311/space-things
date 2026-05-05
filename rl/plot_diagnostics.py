@@ -9,8 +9,8 @@ import numpy as np
 
 
 def plot_diagnostics(
-    telemetry_path: str = "artifacts/telemetry.npz",
-    out_path: str = "artifacts/diagnostics.png",
+    telemetry_path: str = "artifacts/living/telemetry.npz",
+    out_path: str = "artifacts/living/diagnostics.png",
 ) -> Path:
     data = np.load(telemetry_path)
     t = data["t"]

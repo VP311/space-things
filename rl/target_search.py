@@ -52,7 +52,7 @@ def search_best_start_target(
             initial_target_altitude_m=candidate,
             curriculum_enabled=False,
         )
-        rows = _load_episode_rows(Path("artifacts/episode_summaries.jsonl"))
+        rows = _load_episode_rows(Path("artifacts/living/artifacts_train/episode_summaries.jsonl"))
         score, success_rate, mean_max_alt = _learning_score(rows, target_altitude_m=candidate)
         trials.append(
             {
@@ -79,7 +79,7 @@ def search_best_start_target(
         "trials": trials,
     }
 
-    out = Path("artifacts/target_search.json")
+    out = Path("artifacts/living/target_search.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))

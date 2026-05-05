@@ -2,47 +2,49 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 import numpy as np
 from stable_baselines3 import PPO
 
-from config.defaults import AtmosphereConfig, EnvConfig, MissionConfig, default_vehicle_params
-from rl.env import RocketAscentEnv
-
-
-def _resolve_model_path(preferred_path: str) -> str:
-    preferred = Path(preferred_path)
-    best = Path("artifacts/best_model/best_model.zip")
-    if preferred.exists():
-        return str(preferred)
-    if best.exists():
-        return str(best)
-    return str(preferred)
+from config.defaults import default_vehicle_params
+from rl.policy_eval import (
+    DEFAULT_BEST_FINAL_MODEL_PATH,
+    build_eval_env,
+    load_vecnormalize_for_eval,
+    normalise_obs,
+    resolve_model_path,
+    resolve_vecnorm_path,
+)
 
 
 def replay(
-    model_path: str = "artifacts/best_model/best_model.zip",
-    telemetry_path: str = "artifacts/telemetry.npz",
-    metrics_path: str = "artifacts/metrics.json",
+    model_path: str = DEFAULT_BEST_FINAL_MODEL_PATH,
+    vecnorm_path: str | None = None,
+    telemetry_path: str = "artifacts/living/telemetry.npz",
+    metrics_path: str = "artifacts/living/metrics.json",
+    target_altitude_m: float = 100_000.0,
+    allow_missing_vecnorm: bool = False,
 ) -> tuple[Path, Path]:
     params = default_vehicle_params()
-    cfg = EnvConfig()
-    mission = MissionConfig()
-    atmosphere_cfg = AtmosphereConfig()
-    env = RocketAscentEnv(
-        params=params,
-        mission=mission,
-        atmosphere_cfg=atmosphere_cfg,
-        dt=cfg.dt,
-        t_final=cfg.t_final,
-        record=True,
+    resolved_model_path = resolve_model_path(model_path)
+    resolved_vecnorm = resolve_vecnorm_path(vecnorm_path, allow_missing=allow_missing_vecnorm)
+
+    # Raw env for stepping and telemetry — DummyVecEnv auto-resets on done which
+    # clears telemetry before we can read it, so we use the bare env directly.
+    env = build_eval_env(target_altitude_m=target_altitude_m, record=True)
+    vecnorm = (
+        load_vecnormalize_for_eval(resolved_vecnorm, target_altitude_m=target_altitude_m)
+        if resolved_vecnorm is not None
+        else None
     )
-    resolved_model_path = _resolve_model_path(model_path)
     model = PPO.load(resolved_model_path)
 
-    obs, info = env.reset(seed=0, options={"record": True})
+    raw_obs, info = env.reset(seed=0, options={"record": True})
+    obs = normalise_obs(raw_obs, vecnorm)
+
     terminated = False
     truncated = False
     reward_progress: list[float] = []
@@ -51,6 +53,9 @@ def replay(
     reward_fuel_pen: list[float] = []
     reward_tilt_pen: list[float] = []
     reward_smooth_pen: list[float] = []
+    reward_high_stage_energy_bonus: list[float] = []
+    reward_overshoot_pen: list[float] = []
+
     while not (terminated or truncated):
         try:
             action, _ = model.predict(obs, deterministic=True)
@@ -59,8 +64,10 @@ def replay(
                 "Loaded policy is incompatible with current environment. "
                 "Retrain with `python3 -m rl.train` before replay."
             ) from exc
-        obs, reward, terminated, truncated, info = env.step(action)
-        _ = reward
+        if isinstance(action, np.ndarray) and action.ndim > 1:
+            action = action[0]
+        raw_obs, _reward, terminated, truncated, info = env.step(action)
+        obs = normalise_obs(raw_obs, vecnorm)
         comps = info.get("reward_components_step", {})
         reward_progress.append(float(comps.get("progress", 0.0)))
         reward_q_pen.append(float(comps.get("q_pen", 0.0)))
@@ -68,6 +75,8 @@ def replay(
         reward_fuel_pen.append(float(comps.get("fuel_pen", 0.0)))
         reward_tilt_pen.append(float(comps.get("tilt_pen", 0.0)))
         reward_smooth_pen.append(float(comps.get("smooth_pen", 0.0)))
+        reward_high_stage_energy_bonus.append(float(comps.get("high_stage_energy_bonus", 0.0)))
+        reward_overshoot_pen.append(float(comps.get("overshoot_pen", 0.0)))
 
     if env.telemetry is None or not env.telemetry:
         raise RuntimeError("No telemetry collected during replay.")
@@ -106,6 +115,8 @@ def replay(
         reward_fuel_pen=np.array(reward_fuel_pen, dtype=np.float32),
         reward_tilt_pen=np.array(reward_tilt_pen, dtype=np.float32),
         reward_smooth_pen=np.array(reward_smooth_pen, dtype=np.float32),
+        reward_high_stage_energy_bonus=np.array(reward_high_stage_energy_bonus, dtype=np.float32),
+        reward_overshoot_pen=np.array(reward_overshoot_pen, dtype=np.float32),
     )
 
     max_altitude = float(np.max(z))
@@ -117,11 +128,17 @@ def replay(
     total_downrange = float(np.linalg.norm([x[-1], y[-1]]))
 
     metrics = {
+        "target_altitude_m": float(target_altitude_m),
         "max_altitude_m": max_altitude,
         "max_q_pa": max_q_dyn,
+        "q_margin_pa": float(info.get("q_margin_pa", 0.0)),
+        "q_over_limit_fraction": float(info.get("q_over_limit_fraction", 0.0)),
         "max_g_load": float(info.get("max_g_load", 0.0)),
         "apogee_time_s": apogee_time,
         "time_to_burnout_s": time_to_burnout,
+        "altitude_at_burnout_m": float(info.get("altitude_at_burnout_m", float("nan"))),
+        "velocity_at_burnout_mps": float(info.get("velocity_at_burnout_mps", float("nan"))),
+        "vz_at_burnout_mps": float(info.get("vz_at_burnout_mps", float("nan"))),
         "total_downrange_m": total_downrange,
         "crash": bool(info.get("crash", False)),
         "hard_violation": bool(info.get("hard_violation", False)),
@@ -157,5 +174,28 @@ def replay(
     return telemetry_out, metrics_out
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Replay a trained rocket policy and save telemetry")
+    parser.add_argument("--model-path", type=str, default=DEFAULT_BEST_FINAL_MODEL_PATH)
+    parser.add_argument("--vecnorm-path", type=str, default=None)
+    parser.add_argument("--telemetry-path", type=str, default="artifacts/living/telemetry.npz")
+    parser.add_argument("--metrics-path", type=str, default="artifacts/living/metrics.json")
+    parser.add_argument("--target-altitude-m", type=float, default=100_000.0)
+    parser.add_argument(
+        "--allow-missing-vecnorm",
+        action="store_true",
+        help="Allow replay without VecNormalize stats",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    replay()
+    args = _parse_args()
+    replay(
+        model_path=args.model_path,
+        vecnorm_path=args.vecnorm_path,
+        telemetry_path=args.telemetry_path,
+        metrics_path=args.metrics_path,
+        target_altitude_m=args.target_altitude_m,
+        allow_missing_vecnorm=args.allow_missing_vecnorm,
+    )

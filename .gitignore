@@ -3,6 +3,12 @@
 
 # Training artifacts (checkpoints, models, logs, telemetry)
 artifacts/
+artifacts_*/
+artifacts-run*/
+artifacts_run*/
+artifacts_bc*/
+artifacts_expert*/
+*.pid
 
 # Python
 __pycache__/
@@ -32,6 +38,10 @@ env/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local status tracking (not for repo)
+STATUS.md
+status.md
 
 # Misc
 *.log

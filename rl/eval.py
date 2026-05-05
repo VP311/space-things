@@ -2,149 +2,84 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
-import numpy as np
 from stable_baselines3 import PPO
 
-from config.defaults import AtmosphereConfig, EnvConfig, MissionConfig, default_vehicle_params
-from rl.env import RocketAscentEnv, baseline_action
-
-
-def _resolve_model_path(preferred_path: str) -> str:
-    preferred = Path(preferred_path)
-    best = Path("artifacts/best_model/best_model.zip")
-    if preferred.exists():
-        return str(preferred)
-    if best.exists():
-        return str(best)
-    return str(preferred)
-
-
-def evaluate_policy(
-    mode: str,
-    n_episodes: int = 100,
-    model: PPO | None = None,
-    seed_start: int = 1000,
-) -> dict:
-    if mode not in {"baseline", "trained"}:
-        raise ValueError("mode must be 'baseline' or 'trained'")
-    if mode == "trained" and model is None:
-        raise ValueError("trained mode requires a loaded model")
-
-    params = default_vehicle_params()
-    cfg = EnvConfig()
-    mission = MissionConfig()
-    atmosphere_cfg = AtmosphereConfig()
-    env = RocketAscentEnv(
-        params=params,
-        mission=mission,
-        atmosphere_cfg=atmosphere_cfg,
-        dt=cfg.dt,
-        t_final=cfg.t_final,
-        record=False,
-    )
-
-    rows: list[dict] = []
-    for i in range(n_episodes):
-        seed = seed_start + i
-        obs, info = env.reset(seed=seed)
-        terminated = False
-        truncated = False
-        steps = 0
-        while not (terminated or truncated):
-            if mode == "baseline":
-                action = baseline_action(
-                    env.t,
-                    env.params.max_gimbal,
-                    altitude_m=float(info["altitude_m"]),
-                    q_dyn_pa=float(info["q_dyn_pa"]),
-                    q_limit_pa=env.mission.max_q_pa,
-                )
-            else:
-                action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            _ = reward
-            steps += 1
-
-        rows.append(
-            {
-                "seed": seed,
-                "steps": steps,
-                "success": bool(info["success"]),
-                "crash": bool(info["crash"]),
-                "hard_violation": bool(info["hard_violation"]),
-                "max_altitude_m": float(info["max_altitude_m"]),
-                "max_q_dyn": float(info["max_q_dyn"]),
-                "max_g_load": float(info["max_g_load"]),
-                "terminal_altitude_m": float(info["altitude_m"]),
-                "terminal_vx_mps": float(info["vx_mps"]),
-                "terminal_vz_mps": float(info["vz_mps"]),
-                "terminal_flight_path_angle_deg": float(info["flight_path_angle_deg"]),
-                "fuel_used_fraction": float(info["fuel_used_fraction"]),
-            }
-        )
-
-    success = np.array([r["success"] for r in rows], dtype=bool)
-    crash = np.array([r["crash"] for r in rows], dtype=bool)
-    hard_violation = np.array([r["hard_violation"] for r in rows], dtype=bool)
-    max_q = np.array([r["max_q_dyn"] for r in rows], dtype=float)
-    max_g = np.array([r["max_g_load"] for r in rows], dtype=float)
-    terminal_alt = np.array([r["terminal_altitude_m"] for r in rows], dtype=float)
-    terminal_vx = np.array([r["terminal_vx_mps"] for r in rows], dtype=float)
-    terminal_vz = np.array([r["terminal_vz_mps"] for r in rows], dtype=float)
-    terminal_gamma = np.array([r["terminal_flight_path_angle_deg"] for r in rows], dtype=float)
-    fuel_used = np.array([r["fuel_used_fraction"] for r in rows], dtype=float)
-    q_violation = max_q > env.mission.max_q_pa
-    g_violation = max_g > env.mission.max_g_load
-
-    return {
-        "mode": mode,
-        "n_episodes": n_episodes,
-        "success_rate": float(np.mean(success)),
-        "crash_rate": float(np.mean(crash)),
-        "hard_violation_rate": float(np.mean(hard_violation)),
-        "q_violation_rate": float(np.mean(q_violation)),
-        "g_violation_rate": float(np.mean(g_violation)),
-        "avg_max_q": float(np.mean(max_q)),
-        "avg_max_g_load": float(np.mean(max_g)),
-        "avg_terminal_altitude_m": float(np.mean(terminal_alt)),
-        "avg_terminal_vx_mps": float(np.mean(terminal_vx)),
-        "avg_terminal_vz_mps": float(np.mean(terminal_vz)),
-        "avg_terminal_flight_path_angle_deg": float(np.mean(terminal_gamma)),
-        "avg_fuel_used_fraction": float(np.mean(fuel_used)),
-        "episodes": rows,
-    }
+from config.defaults import AtmosphereConfig, EnvConfig, MissionConfig
+from rl.policy_eval import (
+    DEFAULT_BEST_FINAL_MODEL_PATH,
+    evaluate_policy,
+    load_vecnormalize_for_eval,
+    resolve_model_path,
+    resolve_vecnorm_path,
+)
 
 
 def run_eval(
-    model_path: str = "artifacts/best_model/best_model.zip",
-    out_path: str = "artifacts/eval_results.json",
+    model_path: str = DEFAULT_BEST_FINAL_MODEL_PATH,
+    vecnorm_path: str | None = None,
+    out_path: str = "artifacts/living/eval_results.json",
     n_episodes: int = 100,
+    seed_start: int = 2000,
+    target_altitude_m: float = 100_000.0,
+    allow_missing_vecnorm: bool = False,
+    deterministic: bool = True,
+    skip_baseline: bool = False,
 ) -> dict:
     cfg = EnvConfig()
     mission = MissionConfig()
     atmosphere_cfg = AtmosphereConfig()
     results: dict[str, object] = {
+        "eval": {
+            "n_episodes": int(n_episodes),
+            "seed_start": int(seed_start),
+            "seed_end": int(seed_start + n_episodes - 1),
+            "deterministic": bool(deterministic),
+            "skip_baseline": bool(skip_baseline),
+        },
         "config": {
             "dt": cfg.dt,
             "t_final": cfg.t_final,
             "train_total_timesteps": cfg.train_total_timesteps,
+            "target_altitude_m": target_altitude_m,
             "mission": mission.__dict__,
             "atmosphere": atmosphere_cfg.__dict__,
         }
     }
 
-    baseline = evaluate_policy(mode="baseline", n_episodes=n_episodes, model=None, seed_start=1000)
-    results["baseline"] = baseline
+    if not skip_baseline:
+        baseline = evaluate_policy(
+            mode="baseline",
+            n_episodes=n_episodes,
+            seed_start=seed_start,
+            target_altitude_m=target_altitude_m,
+            deterministic=deterministic,
+        )
+        results["baseline"] = baseline
 
-    resolved_model_path = _resolve_model_path(model_path)
+    resolved_model_path = resolve_model_path(model_path)
     model_file = Path(resolved_model_path)
     if model_file.exists():
+        resolved_vecnorm = resolve_vecnorm_path(vecnorm_path, allow_missing=allow_missing_vecnorm)
         try:
             model = PPO.load(str(model_file))
-            trained = evaluate_policy(mode="trained", n_episodes=n_episodes, model=model, seed_start=2000)
+            vecnorm = (
+                load_vecnormalize_for_eval(resolved_vecnorm, target_altitude_m=target_altitude_m)
+                if resolved_vecnorm is not None
+                else None
+            )
+            trained = evaluate_policy(
+                mode="trained",
+                n_episodes=n_episodes,
+                model=model,
+                vecnorm=vecnorm,
+                seed_start=seed_start,
+                target_altitude_m=target_altitude_m,
+                deterministic=deterministic,
+            )
             results["trained"] = trained
         except Exception as exc:
             results["trained"] = {
@@ -160,6 +95,8 @@ def run_eval(
 
     print(f"saved eval: {out}")
     for key in ("baseline", "trained"):
+        if key not in results:
+            continue
         section = results.get(key, {})
         if isinstance(section, dict) and section.get("available") is False:
             print(f"{key}: unavailable ({section.get('reason')})")
@@ -168,13 +105,54 @@ def run_eval(
             print(
                 f"{key}: "
                 f"success_rate={section['success_rate']:.3f} "
-                f"crash_rate={section['crash_rate']:.3f} "
+                f"q_ok_rate={section['q_ok_rate']:.3f} "
+                f"avg_max_alt={section['avg_max_altitude_m']:.1f} "
                 f"avg_max_q={section['avg_max_q']:.1f} "
-                f"avg_max_g={section['avg_max_g_load']:.2f} "
-                f"avg_terminal_alt={section['avg_terminal_altitude_m']:.1f}"
+                f"avg_burnout_vz={section['avg_burnout_vz_mps']:.1f}"
             )
     return results
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate baseline and trained rocket policies")
+    parser.add_argument("--model-path", type=str, default=DEFAULT_BEST_FINAL_MODEL_PATH)
+    parser.add_argument("--vecnorm-path", type=str, default=None)
+    parser.add_argument("--out-path", type=str, default="artifacts/living/eval_results.json")
+    parser.add_argument("--n-episodes", type=int, default=100)
+    parser.add_argument("--seed-start", type=int, default=2000)
+    parser.add_argument("--target-altitude-m", type=float, default=100_000.0)
+    parser.add_argument(
+        "--deterministic",
+        dest="deterministic",
+        action="store_true",
+        default=True,
+        help="Use deterministic policy actions",
+    )
+    parser.add_argument(
+        "--stochastic",
+        dest="deterministic",
+        action="store_false",
+        help="Use stochastic policy actions",
+    )
+    parser.add_argument("--skip-baseline", action="store_true", help="Only evaluate the trained policy")
+    parser.add_argument(
+        "--allow-missing-vecnorm",
+        action="store_true",
+        help="Allow trained-policy eval without VecNormalize stats",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    run_eval()
+    args = _parse_args()
+    run_eval(
+        model_path=args.model_path,
+        vecnorm_path=args.vecnorm_path,
+        out_path=args.out_path,
+        n_episodes=args.n_episodes,
+        seed_start=args.seed_start,
+        target_altitude_m=args.target_altitude_m,
+        allow_missing_vecnorm=args.allow_missing_vecnorm,
+        deterministic=args.deterministic,
+        skip_baseline=args.skip_baseline,
+    )

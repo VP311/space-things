@@ -13,8 +13,8 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 
 
 def animate_telemetry(
-    telemetry_path: str = "artifacts/telemetry.npz",
-    output_path: str = "artifacts/trajectory.gif",
+    telemetry_path: str = "artifacts/living/telemetry.npz",
+    output_path: str = "artifacts/living/trajectory.gif",
 ) -> Path:
     data = np.load(telemetry_path)
     t = data["t"]

@@ -13,39 +13,67 @@ from sim.vehicle import VehicleParams
 class EnvConfig:
     dt: float = 0.05
     t_final: float = 300.0
-    train_total_timesteps: int = 3_000_000
+    train_total_timesteps: int = 5_000_000
+    action_repeat: int = 4
 
 
 @dataclass(frozen=True)
 class PPOConfig:
-    total_timesteps: int = 3_000_000
-    n_envs: int = 4
+    total_timesteps: int = 15_000_000
+    n_envs: int = 8
     n_steps: int = 4096
     batch_size: int = 512
+    use_lstm: bool = True
+    lstm_hidden_size: int = 128
     gamma: float = 0.999
-    gae_lambda: float = 0.97
-    learning_rate: float = 2.5e-4
-    ent_coef: float = 0.001
-    clip_range: float = 0.2
+    gae_lambda: float = 0.95
+    lr_start: float = 1e-4
+    lr_end: float = 5e-6
+    ent_coef_start: float = 1e-3
+    ent_coef_end: float = 1e-4
+    clip_range: float = 0.12
+    n_epochs: int = 16
+    vf_coef: float = 0.8
     net_arch: tuple[int, int] = (256, 128)
     seed: int = 0
     eval_freq_steps: int = 100_000
     eval_episodes: int = 20
+    official_eval_freq_steps: int = 500_000
+    official_eval_episodes: int = 100
+    final_eval_seed_start: int = 2_000
+    official_eval_seed_start: int = 3_000
+    official_success_threshold: float = 0.80
+    official_success_streak: int = 2
     checkpoint_freq_steps: int = 100_000
-    target_kl: float = 0.03
+    target_kl: float = 0.02
 
 
 @dataclass(frozen=True)
 class CurriculumConfig:
     enabled: bool = True
     initial_target_altitude_m: float = 3_000.0
-    max_target_altitude_m: float = 120_000.0
-    success_threshold: float = 0.45
-    altitude_ratio_threshold: float = 0.85
-    altitude_ratio_upper_bound: float = 1.4
-    growth_factor: float = 1.15
-    window_episodes: int = 40
+    target_milestones_m: tuple[float, ...] = (
+        3_000.0,
+        10_000.0,
+        20_000.0,
+        35_000.0,
+        50_000.0,
+        65_000.0,
+        75_000.0,
+        85_000.0,
+        88_000.0,
+        92_000.0,
+        94_000.0,
+        96_000.0,
+        98_000.0,
+        100_000.0,
+    )
+    promotion_window_episodes: int = 40
     start_altitude_fraction: float = 0.0
+    low_stage_success_threshold: float = 0.45
+    high_stage_threshold_m: float = 65_000.0
+    high_stage_success_threshold: float = 0.45
+    high_stage_altitude_ratio_threshold: float = 0.98
 
 
 @dataclass(frozen=True)
@@ -61,7 +89,7 @@ class MissionConfig:
     min_flight_path_angle_deg: float = 8.0
     max_flight_path_angle_deg: float = 80.0
     max_terminal_abs_vz_mps: float = 120.0
-    max_q_pa: float = 55_000.0
+    max_q_pa: float = 70_000.0
     max_g_load: float = 8.5
     max_terminal_downrange_m: float = 10_000.0
     target_altitude_m: float = 2_500.0
@@ -99,7 +127,7 @@ def default_vehicle_params() -> VehicleParams:
         max_thrust=1.5e6,
         isp=300.0,
         dry_mass=2.0e4,
-        prop_mass=2.0e4,
+        prop_mass=2.5e4,
         area_ref=10.0,
         cd=0.5,
         gimbal_arm=1.2,
